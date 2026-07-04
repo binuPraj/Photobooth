@@ -12,6 +12,30 @@ interface CameraViewProps {
   countdownDuration: number;
 }
 
+const PEER_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ]
+  }
+};
+
 // Robust local video component that guarantees the stream is bound to the DOM
 const LocalVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, label?: React.ReactNode }>(({ stream, label }, ref) => {
   const localRef = useRef<HTMLVideoElement>(null);
@@ -242,7 +266,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
     const peerId = `pb-${randomCode}`;
 
-    const newPeer = new Peer(peerId, { debug: 1 });
+    const newPeer = new Peer(peerId, PEER_CONFIG);
 
     newPeer.on('open', () => {
       setPeer(newPeer);
@@ -273,7 +297,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     cleanupPeer();
     setConnectionStatusText('Connecting to session...');
     
-    const newPeer = new Peer(undefined, { debug: 1 });
+    const newPeer = new Peer(PEER_CONFIG);
     
     newPeer.on('open', () => {
       setPeer(newPeer);
