@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Camera, RefreshCw, Upload, AlertCircle, Sparkles, Check, Trash2, Users, Link2, Copy, Unlink, Heart } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Layout } from '../types';
@@ -64,25 +64,28 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, []);
 
-  // Callback refs to handle dynamic srcObject assignment and prevent stream loss
-  const setLocalVideo = useCallback((node: HTMLVideoElement | null) => {
-    videoRef.current = node;
-    if (node && streamRef.current) {
-      if (node.srcObject !== streamRef.current) {
-        node.srcObject = streamRef.current;
-      }
-    }
-  }, []);
+  // Bind partner stream to the partner video element.
+  // This must watch BOTH partnerStream and isConnected because
+  // the <video> element only mounts when isConnected is true,
+  // and both states are set in the same PeerJS callback (batched).
+  // We use a small delay to ensure the DOM element has mounted.
+  useEffect(() => {
+    if (!partnerStream || !isConnected) return;
 
-  const setPartnerVideo = useCallback((node: HTMLVideoElement | null) => {
-    partnerVideoRef.current = node;
-    if (node && partnerStream) {
-      if (node.srcObject !== partnerStream) {
-        node.srcObject = partnerStream;
+    const bindStream = () => {
+      const el = partnerVideoRef.current;
+      if (el) {
+        el.srcObject = partnerStream;
+        el.play().catch(err => console.warn('Partner video play failed:', err));
+      } else {
+        // Element not yet in DOM, retry shortly
+        setTimeout(bindStream, 100);
       }
-      node.play().catch(err => console.warn("Partner video play failed:", err));
-    }
-  }, [partnerStream]);
+    };
+
+    // Small delay to let React flush the DOM after isConnected triggers conditional render
+    setTimeout(bindStream, 50);
+  }, [partnerStream, isConnected]);
 
   const checkPermissionsAndDevices = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
@@ -219,24 +222,27 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     // Listen for incoming video call
     newPeer.on('call', (call) => {
-      if (streamRef.current) {
-        call.answer(streamRef.current);
-        setCurrentCall(call);
-        call.on('stream', (remoteStream) => {
-          setPartnerStream(remoteStream);
-          setIsConnected(true);
-          setConnectionStatusText('Partner connected!');
-        });
+      const localStream = streamRef.current;
+      console.log('[PhotoBooth Host] Incoming call, answering with stream:', !!localStream);
+      
+      if (localStream) {
+        call.answer(localStream);
       } else {
-        // Fallback answer even if no local camera stream is running
-        call.answer();
-        setCurrentCall(call);
-        call.on('stream', (remoteStream) => {
-          setPartnerStream(remoteStream);
-          setIsConnected(true);
-          setConnectionStatusText('Partner connected!');
-        });
+        call.answer(new MediaStream());
       }
+      
+      setCurrentCall(call);
+      
+      call.on('stream', (remoteStream: MediaStream) => {
+        console.log('[PhotoBooth Host] Received partner stream, tracks:', remoteStream.getTracks().length);
+        setPartnerStream(remoteStream);
+        setIsConnected(true);
+        setConnectionStatusText('Partner connected!');
+      });
+      
+      call.on('error', (err: any) => {
+        console.error('[PhotoBooth Host] Call error:', err);
+      });
     });
   };
 
@@ -260,24 +266,23 @@ export const CameraView: React.FC<CameraViewProps> = ({
       setConn(connection);
       setupDataConnection(connection);
 
-      // Call the host
-      if (streamRef.current) {
-        const call = newPeer.call(hostId, streamRef.current);
-        setCurrentCall(call);
-        call.on('stream', (remoteStream) => {
-          setPartnerStream(remoteStream);
-          setIsConnected(true);
-          setConnectionStatusText('Connected to host!');
-        });
-      } else {
-        const call = newPeer.call(hostId, new MediaStream());
-        setCurrentCall(call);
-        call.on('stream', (remoteStream) => {
-          setPartnerStream(remoteStream);
-          setIsConnected(true);
-          setConnectionStatusText('Connected to host!');
-        });
-      }
+      // Call the host with our local stream
+      const localStream = streamRef.current || new MediaStream();
+      console.log('[PhotoBooth Guest] Calling host with stream:', !!streamRef.current);
+      
+      const call = newPeer.call(hostId, localStream);
+      setCurrentCall(call);
+      
+      call.on('stream', (remoteStream: MediaStream) => {
+        console.log('[PhotoBooth Guest] Received host stream, tracks:', remoteStream.getTracks().length);
+        setPartnerStream(remoteStream);
+        setIsConnected(true);
+        setConnectionStatusText('Connected to host!');
+      });
+      
+      call.on('error', (err: any) => {
+        console.error('[PhotoBooth Guest] Call error:', err);
+      });
     });
 
     newPeer.on('error', (err) => {
@@ -288,7 +293,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const setupDataConnection = (connection: any) => {
     connection.on('open', () => {
-      setIsConnected(true);
+      // Data channel open - don't set isConnected here.
+      // Wait for the media stream to arrive so both isConnected
+      // and partnerStream are set in the same render cycle.
+      console.log('[PhotoBooth] Data channel open');
     });
 
     connection.on('data', (data: any) => {
