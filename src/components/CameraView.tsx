@@ -630,23 +630,29 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
             {permissionState === 'granted' && (
               <div className="w-full h-full relative">
-                {coupleModeActive && isConnected ? (
-                  /* Dual Screen Grid Layout */
-                  <div className="grid grid-cols-2 w-full h-full bg-stone-900 gap-1.5 p-1.5">
-                    {/* Left screen: Local user */}
-                    <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 border border-stone-800">
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full h-full object-cover scale-x-[-1]"
-                      />
-                      <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] text-white font-sans">
+                <div className={`w-full h-full bg-stone-900 p-1.5 ${
+                  coupleModeActive && isConnected 
+                    ? 'grid grid-cols-2 gap-1.5' 
+                    : 'block'
+                }`}>
+                  {/* Left/Main screen: Local user */}
+                  <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 border border-stone-800">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover scale-x-[-1]"
+                    />
+                    {coupleModeActive && isConnected && (
+                      <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white font-sans">
                         You
                       </div>
-                    </div>
-                    {/* Right screen: Remote partner */}
+                    )}
+                  </div>
+                  
+                  {/* Right screen: Remote partner */}
+                  {coupleModeActive && isConnected && (
                     <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 border border-stone-800">
                       <video
                         ref={partnerVideoRef}
@@ -654,22 +660,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
                         playsInline
                         className="w-full h-full object-cover scale-x-[-1]"
                       />
-                      <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] text-rose-300 font-sans flex items-center gap-1">
-                        <Heart className="w-3 h-3 fill-rose-500 text-rose-500" />
+                      <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-rose-300 font-sans flex items-center gap-1">
+                        <Heart className="w-3 h-3 fill-rose-500 text-rose-500 animate-pulse" />
                         Partner
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  /* Single full screen layout */
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full h-full object-cover scale-x-[-1]"
-                  />
-                )}
+                  )}
+                </div>
               </div>
             )}
 
