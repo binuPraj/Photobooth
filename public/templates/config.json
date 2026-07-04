@@ -1,0 +1,74 @@
+{
+  "templates": [
+    {
+      "id": "warm-minimal",
+      "name": "Warm Minimalist",
+      "backgroundColor": "#FAF6F0",
+      "textColor": "#4A3F35",
+      "fontFamily": "Outfit, sans-serif",
+      "borderColor": "#EAE3D2",
+      "borderWidth": 4,
+      "padding": 24,
+      "gap": 16,
+      "bottomSpace": 70,
+      "borderRadius": 6,
+      "description": "Clean and timeless with soft off-white tones."
+    },
+    {
+      "id": "vintage-dark",
+      "name": "Classic Vintage",
+      "backgroundColor": "#191919",
+      "textColor": "#F5F5F5",
+      "fontFamily": "Playfair Display, serif",
+      "borderColor": "#2A2A2A",
+      "borderWidth": 6,
+      "padding": 26,
+      "gap": 18,
+      "bottomSpace": 75,
+      "borderRadius": 0,
+      "description": "High-contrast retro style with dark aesthetic borders."
+    },
+    {
+      "id": "spring-sage",
+      "name": "Aesthetic Sage",
+      "backgroundColor": "#E4EDE4",
+      "textColor": "#2C3E2B",
+      "fontFamily": "Outfit, sans-serif",
+      "borderColor": "#D0DDD0",
+      "borderWidth": 4,
+      "padding": 24,
+      "gap": 16,
+      "bottomSpace": 70,
+      "borderRadius": 12,
+      "description": "Fresh and soothing light green tones with rounded corners."
+    },
+    {
+      "id": "cozy-rose",
+      "name": "Cozy Rose",
+      "backgroundColor": "#FBF0EF",
+      "textColor": "#6E4E4A",
+      "fontFamily": "Outfit, sans-serif",
+      "borderColor": "#EED8D6",
+      "borderWidth": 5,
+      "padding": 24,
+      "gap": 16,
+      "bottomSpace": 70,
+      "borderRadius": 10,
+      "description": "Blush pink and warm undertones for soft vibes."
+    },
+    {
+      "id": "scrapbook-kraft",
+      "name": "Scrapbook Kraft",
+      "backgroundColor": "#EADEC9",
+      "textColor": "#514030",
+      "fontFamily": "Playfair Display, serif",
+      "borderColor": "#D1C0A5",
+      "borderWidth": 8,
+      "padding": 30,
+      "gap": 20,
+      "bottomSpace": 85,
+      "borderRadius": 4,
+      "description": "Warm paper-like craft texture with wide framing."
+    }
+  ]
+}
