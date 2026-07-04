@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Camera, RefreshCw, Upload, AlertCircle, Sparkles, Check, Trash2, Users, Link2, Copy, Unlink, Heart } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Layout } from '../types';
@@ -64,10 +64,23 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, []);
 
-  // Sync partner stream to DOM element
-  useEffect(() => {
-    if (partnerVideoRef.current && partnerStream) {
-      partnerVideoRef.current.srcObject = partnerStream;
+  // Callback refs to handle dynamic srcObject assignment and prevent stream loss
+  const setLocalVideo = useCallback((node: HTMLVideoElement | null) => {
+    videoRef.current = node;
+    if (node && streamRef.current) {
+      if (node.srcObject !== streamRef.current) {
+        node.srcObject = streamRef.current;
+      }
+    }
+  }, []);
+
+  const setPartnerVideo = useCallback((node: HTMLVideoElement | null) => {
+    partnerVideoRef.current = node;
+    if (node && partnerStream) {
+      if (node.srcObject !== partnerStream) {
+        node.srcObject = partnerStream;
+      }
+      node.play().catch(err => console.warn("Partner video play failed:", err));
     }
   }, [partnerStream]);
 
