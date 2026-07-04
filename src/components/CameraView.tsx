@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { Camera, RefreshCw, Upload, AlertCircle, Sparkles, Check, Trash2, Users, Link2, Copy, Unlink, Heart } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Layout } from '../types';
@@ -12,26 +12,16 @@ interface CameraViewProps {
   countdownDuration: number;
 }
 
-const PEER_CONFIG = {
-  debug: 1,
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:global.stun.twilio.com:3478' }
-    ]
-  }
-};
-
-// Robust Video Component to guarantee stream binding to the DOM element
-const VideoStream = React.forwardRef<HTMLVideoElement, { stream: MediaStream | null, isMirrored?: boolean, label?: React.ReactNode }>(({ stream, isMirrored = true, label }, ref) => {
+// Robust local video component that guarantees the stream is bound to the DOM
+const LocalVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, label?: React.ReactNode }>(({ stream, label }, ref) => {
   const localRef = useRef<HTMLVideoElement>(null);
   
-  React.useImperativeHandle(ref, () => localRef.current as HTMLVideoElement);
+  useImperativeHandle(ref, () => localRef.current as HTMLVideoElement);
   
   useEffect(() => {
     if (localRef.current && stream) {
       localRef.current.srcObject = stream;
-      localRef.current.play().catch(e => console.warn('Video play prevented:', e));
+      localRef.current.play().catch(() => {});
     }
   }, [stream]);
 
@@ -40,7 +30,7 @@ const VideoStream = React.forwardRef<HTMLVideoElement, { stream: MediaStream | n
       {!stream ? (
         <div className="flex flex-col items-center gap-2 text-stone-500">
           <RefreshCw className="w-5 h-5 animate-spin" />
-          <span className="text-[10px] font-sans">Waiting for video stream...</span>
+          <span className="text-[10px] font-sans">Waiting for camera...</span>
         </div>
       ) : (
         <>
@@ -49,7 +39,7 @@ const VideoStream = React.forwardRef<HTMLVideoElement, { stream: MediaStream | n
             autoPlay
             playsInline
             muted
-            className={`w-full h-full object-cover ${isMirrored ? 'scale-x-[-1]' : ''}`}
+            className="w-full h-full object-cover scale-x-[-1]"
           />
           {label && (
             <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white font-sans flex items-center gap-1">
@@ -71,6 +61,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const connRef = useRef<any>(null);
+  const frameIntervalRef = useRef<any>(null);
   
   const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'checking'>('checking');
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -92,7 +83,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [coupleModeActive, setCoupleModeActive] = useState<boolean>(false);
   const [peer, setPeer] = useState<Peer | null>(null);
   const [conn, setConn] = useState<any>(null);
-  const [currentCall, setCurrentCall] = useState<any>(null);
   const [peerIdCode, setPeerIdCode] = useState<string>('');
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -100,16 +90,14 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [connectionStatusText, setConnectionStatusText] = useState<string>('');
 
-  // Partner media stream for live preview
-  const [partnerStream, setPartnerStream] = useState<MediaStream | null>(null);
-  // Local stream state to force re-renders when stream is available
+  // Partner frame preview (received via data channel)
+  const [partnerFrame, setPartnerFrame] = useState<string>('');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
   // Dual photo store for merging
   const [myPhotos, setMyPhotos] = useState<{ [key: number]: string }>({});
   const [partnerPhotos, setPartnerPhotos] = useState<{ [key: number]: string }>({});
 
-  // Check camera permissions and list cameras
   useEffect(() => {
     checkPermissionsAndDevices();
     return () => {
@@ -118,7 +106,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, []);
 
-  // Keep connRef in sync with conn state
   useEffect(() => {
     connRef.current = conn;
   }, [conn]);
@@ -172,15 +159,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
       streamRef.current = stream;
       setLocalStream(stream);
       setPermissionState('granted');
-      
-      // If we change camera during an active call, replace the video track
-      if (currentCall && isConnected) {
-        const videoTrack = stream.getVideoTracks()[0];
-        const sender = currentCall.peerConnection.getSenders().find((s: any) => s.track?.kind === 'video');
-        if (sender && videoTrack) {
-          sender.replaceTrack(videoTrack);
-        }
-      }
     } catch (err: any) {
       console.error('Error starting camera:', err);
       setErrorMsg('Error opening camera stream.');
@@ -196,15 +174,14 @@ export const CameraView: React.FC<CameraViewProps> = ({
   };
 
   const cleanupPeer = () => {
-    if (currentCall) currentCall.close();
+    stopFrameStreaming();
     if (conn) conn.close();
     if (peer) peer.destroy();
     setPeer(null);
     setConn(null);
-    setCurrentCall(null);
     connRef.current = null;
     setIsConnected(false);
-    setPartnerStream(null);
+    setPartnerFrame('');
     setMyPhotos({});
     setPartnerPhotos({});
     setPeerIdCode('');
@@ -217,6 +194,46 @@ export const CameraView: React.FC<CameraViewProps> = ({
     startCamera(newId);
   };
 
+  // --- Frame streaming over data channel (Replaces WebRTC Media Streams) ---
+  
+  const startFrameStreaming = (connection: any) => {
+    stopFrameStreaming();
+    
+    frameIntervalRef.current = setInterval(() => {
+      const activeConn = connRef.current || connection;
+      if (!activeConn || !activeConn.open) return;
+
+      const video = videoRef.current;
+      if (!video || video.videoWidth === 0) return;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 240;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Mirror the frame so it looks correct to the partner
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const frame = canvas.toDataURL('image/jpeg', 0.4);
+      
+      try {
+        activeConn.send({ type: 'FRAME', data: frame });
+      } catch (e) {
+        console.error('Failed to send frame', e);
+      }
+    }, 250); // 4fps preview
+  };
+
+  const stopFrameStreaming = () => {
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+  };
+
   // --- Couple Session Handlers ---
 
   const handleCreateSession = () => {
@@ -225,7 +242,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
     const peerId = `pb-${randomCode}`;
 
-    const newPeer = new Peer(peerId, PEER_CONFIG);
+    const newPeer = new Peer(peerId, { debug: 1 });
 
     newPeer.on('open', () => {
       setPeer(newPeer);
@@ -239,32 +256,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
       setConnectionStatusText('Code already taken. Please try again.');
     });
 
-    // Listen for incoming data connection
     newPeer.on('connection', (connection) => {
       console.log('[Host] Partner connected via data channel');
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
-    });
-
-    // Listen for incoming media call
-    newPeer.on('call', (call) => {
-      const currentLocalStream = streamRef.current;
-      console.log('[Host] Incoming call. Replying with stream:', !!currentLocalStream);
-      
-      call.answer(currentLocalStream || new MediaStream());
-      setCurrentCall(call);
-
-      call.on('stream', (remoteStream) => {
-        console.log('[Host] Received partner video stream');
-        setPartnerStream(remoteStream);
-        setIsConnected(true);
-        setConnectionStatusText('Connected! Live preview active.');
-      });
-      
-      call.on('close', () => {
-        setPartnerStream(null);
-      });
     });
   };
 
@@ -277,7 +273,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     cleanupPeer();
     setConnectionStatusText('Connecting to session...');
     
-    const newPeer = new Peer(undefined, PEER_CONFIG);
+    const newPeer = new Peer(undefined, { debug: 1 });
     
     newPeer.on('open', () => {
       setPeer(newPeer);
@@ -286,28 +282,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
       const hostId = `pb-${joinCodeInput}`;
       console.log('[Guest] Connecting to host:', hostId);
       
-      const connection = newPeer.connect(hostId, { reliable: true });
+      const connection = newPeer.connect(hostId);
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
-
-      // Call the host with our media stream
-      const currentLocalStream = streamRef.current || new MediaStream();
-      console.log('[Guest] Calling host with stream:', !!streamRef.current);
-      
-      const call = newPeer.call(hostId, currentLocalStream);
-      setCurrentCall(call);
-
-      call.on('stream', (remoteStream) => {
-        console.log('[Guest] Received host video stream');
-        setPartnerStream(remoteStream);
-        setIsConnected(true);
-        setConnectionStatusText('Connected! Live preview active.');
-      });
-      
-      call.on('close', () => {
-        setPartnerStream(null);
-      });
     });
 
     newPeer.on('error', (err) => {
@@ -318,11 +296,17 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const setupDataConnection = (connection: any) => {
     connection.on('open', () => {
-      console.log('[P2P] Data channel OPEN');
+      console.log('[P2P] Data channel OPEN - starting frame streaming');
+      setIsConnected(true);
+      setConnectionStatusText('Connected! Live preview active.');
+      
+      startFrameStreaming(connection);
     });
 
     connection.on('data', (data: any) => {
-      if (data.type === 'START_COUNTDOWN') {
+      if (data.type === 'FRAME') {
+        setPartnerFrame(data.data);
+      } else if (data.type === 'START_COUNTDOWN') {
         setIsCapturing(true);
         setTempCapturedPhotos([]);
         setMyPhotos({});
@@ -345,8 +329,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     connection.on('close', () => {
       console.log('[P2P] Data channel closed');
+      stopFrameStreaming();
       setIsConnected(false);
-      setPartnerStream(null);
+      setPartnerFrame('');
       setConnectionStatusText('Partner disconnected.');
     });
 
@@ -368,7 +353,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     
     const activeConn = connRef.current;
     if (isConnected && activeConn) {
-      // Sync trigger to partner
       activeConn.send({
         type: 'START_COUNTDOWN',
         countdownDuration: countdownDuration
@@ -383,7 +367,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setCurrentCaptureStep(0);
   };
 
-  // Loop control
   useEffect(() => {
     if (!isCapturing || currentCaptureStep < 0 || currentCaptureStep >= layout.photosCount) {
       if (isCapturing && currentCaptureStep === layout.photosCount) {
@@ -427,16 +410,14 @@ export const CameraView: React.FC<CameraViewProps> = ({
       
       const activeConn = connRef.current;
       if (isConnected && activeConn) {
-        // Send full-res capture to partner via data channel
+        // Send full-res capture to partner
         activeConn.send({
           type: 'LOCAL_CAPTURE_READY',
           photo: imgDataUrl,
           step: currentCaptureStep
         });
-        // Save local photo
         setMyPhotos(prev => ({ ...prev, [currentCaptureStep]: imgDataUrl }));
       } else {
-        // Single player mode path
         setTempCapturedPhotos(prev => [...prev, imgDataUrl]);
         setTimeout(() => {
           setCurrentCaptureStep(prev => prev + 1);
@@ -446,7 +427,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
   };
 
-  // Composite hook: Wait for both frames, merge and advance
   useEffect(() => {
     if (!isConnected || currentCaptureStep < 0 || currentCaptureStep >= layout.photosCount) return;
 
@@ -487,8 +467,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setMyPhotos({});
     setPartnerPhotos({});
   };
-
-  // --- Upload Mode ---
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -567,7 +545,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
         </button>
       </div>
 
-      {/* Couple Mode Setup Panel */}
       {coupleModeActive && mode === 'camera' && !isConnected && (
         <div className="mb-4 bg-rose-50/50 border border-rose-100 rounded-2xl p-4 sm:p-5 flex flex-col gap-4">
           <div className="flex items-center gap-2 text-rose-700 font-sans font-semibold text-sm">
@@ -576,7 +553,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </div>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Host Section */}
             <div className="bg-white border border-stone-200/60 p-4 rounded-xl flex flex-col justify-between">
               <div>
                 <h4 className="text-xs font-bold text-stone-850 mb-1">Option A: Host Session</h4>
@@ -609,7 +585,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
               )}
             </div>
 
-            {/* Join Section */}
             <div className="bg-white border border-stone-200/60 p-4 rounded-xl flex flex-col justify-between">
               <div>
                 <h4 className="text-xs font-bold text-stone-850 mb-1">Option B: Join Session</h4>
@@ -645,12 +620,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
         </div>
       )}
 
-      {/* Connected Partner Panel */}
       {coupleModeActive && isConnected && (
         <div className="mb-4 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 flex items-center justify-between text-xs font-sans text-emerald-850">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Connected! Live WebRTC preview is Active.</span>
+            <span>Connected! Live Data-Channel preview is Active.</span>
           </div>
           <button 
             onClick={cleanupPeer}
@@ -664,7 +638,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
       {mode === 'camera' ? (
         <div className="flex flex-col gap-4">
-          {/* Camera Viewport Screen */}
           <div className="relative aspect-[4/3] w-full rounded-2xl overflow-hidden bg-stone-950 border border-stone-200 shadow-inner">
             {permissionState === 'checking' && (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-white/70">
@@ -689,31 +662,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
                     : 'block'
                 }`}>
                   {/* Left/Main screen: Local user camera */}
-                  <VideoStream 
+                  <LocalVideo 
                     ref={videoRef} 
                     stream={localStream} 
-                    isMirrored={true}
                     label={coupleModeActive && isConnected ? "You" : undefined}
                   />
                   
-                  {/* Right screen: Partner video preview */}
+                  {/* Right screen: Partner video preview (Frames over Data Channel) */}
                   {coupleModeActive && isConnected && (
-                    <VideoStream 
-                      stream={partnerStream} 
-                      isMirrored={true}
-                      label={
-                        <>
-                          <Heart className="w-3 h-3 fill-rose-500 text-rose-500 animate-pulse" />
-                          Partner
-                        </>
-                      }
-                    />
+                    <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 flex items-center justify-center">
+                      {partnerFrame ? (
+                        <img src={partnerFrame} alt="Partner preview" className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="flex flex-col items-center gap-2 text-stone-500">
+                          <RefreshCw className="w-5 h-5 animate-spin" />
+                          <span className="text-[10px] font-sans">Receiving frames...</span>
+                        </div>
+                      )}
+                      <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white font-sans flex items-center gap-1">
+                        <Heart className="w-3 h-3 fill-rose-500 text-rose-500 animate-pulse" />
+                        Partner
+                      </div>
+                    </div>
                   )}
                 </div>
               </div>
             )}
 
-            {/* Flash Effect Layer */}
             <AnimatePresence>
               {flashActive && (
                 <motion.div
@@ -726,7 +701,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
               )}
             </AnimatePresence>
 
-            {/* Countdown Overlay */}
             <AnimatePresence>
               {isCapturing && countdown > 0 && (
                 <motion.div
@@ -744,7 +718,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
               )}
             </AnimatePresence>
 
-            {/* Capture Progress HUD Overlay */}
             {isCapturing && (
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 text-white text-xs sm:text-sm font-sans flex items-center gap-3 z-10">
                 <Sparkles className="w-4 h-4 text-amber-400 animate-spin" />
@@ -754,7 +727,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
             )}
           </div>
 
-          {/* Camera controls */}
           <div className="flex flex-col sm:flex-row gap-3 items-center justify-between mt-2">
             {devices.length > 1 && !isConnected ? (
               <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -801,7 +773,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </div>
         </div>
       ) : (
-        /* Upload Mode Workspace */
         <div className="flex flex-col gap-4">
           <div className="border-2 border-dashed border-stone-200 bg-stone-50/50 rounded-2xl p-6 sm:p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:bg-stone-50 transition-all relative">
             <input
@@ -815,14 +786,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
             <Upload className="w-8 h-8 text-stone-400 mb-3" />
             <h3 className="text-sm font-sans font-semibold text-stone-800 mb-1">Upload files</h3>
             <p className="text-xs text-stone-500 font-sans max-w-sm mb-2">
-              Select {layout.photosCount} files matching your layout. Add images that you want to stack.
-            </p>
-            <p className="text-[10px] text-stone-400 font-sans bg-stone-100 border border-stone-200/80 px-2 py-0.5 rounded">
-              PNG, JPG, or WEBP supported
+              Select {layout.photosCount} files matching your layout.
             </p>
           </div>
 
-          {/* Grid showing uploaded images */}
           {uploadedPhotos.length > 0 && (
             <div className="bg-stone-50/50 rounded-2xl p-4 border border-stone-200/60">
               <div className="flex justify-between items-center mb-3">
@@ -830,7 +797,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
                   Uploaded {uploadedPhotos.length} of {layout.photosCount}
                 </span>
                 {uploadedPhotos.length === layout.photosCount && (
-                  <span className="text-xs text-emerald-6,00 font-sans font-medium flex items-center gap-1">
+                  <span className="text-xs text-emerald-600 font-sans font-medium flex items-center gap-1">
                     <Check className="w-3.5 h-3.5" /> Ready
                   </span>
                 )}
@@ -842,20 +809,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
                     <img src={photo} alt="" className="w-full h-full object-cover" />
                     <button
                       onClick={() => removeUploadedPhoto(index)}
-                      className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 hover:scale-105 rounded-full p-1 text-white opacity-90 transition-all"
+                      className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 rounded-full p-1 text-white opacity-90 transition-all"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
-                    <div className="absolute bottom-1 left-1 bg-black/40 px-1.5 py-0.5 rounded text-[8px] text-white">
-                      #{index + 1}
-                    </div>
-                  </div>
-                ))}
-                
-                {/* Empty placeholders */}
-                {Array.from({ length: Math.max(0, layout.photosCount - uploadedPhotos.length) }).map((_, idx) => (
-                  <div key={idx} className="aspect-[3/4] rounded-lg border border-dashed border-stone-200 flex items-center justify-center text-stone-300 text-xs">
-                    Slot {uploadedPhotos.length + idx + 1}
                   </div>
                 ))}
               </div>
