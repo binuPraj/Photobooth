@@ -13,6 +13,7 @@ interface CameraViewProps {
 }
 
 const PEER_CONFIG = {
+  debug: 3, // Enable verbose logging for WebRTC debugging
   config: {
     iceServers: [
       { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
@@ -30,8 +31,8 @@ const PEER_CONFIG = {
   }
 };
 
-// Robust local video component that guarantees the stream is bound to the DOM
-const LocalVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, label?: React.ReactNode }>(({ stream, label }, ref) => {
+// Robust Video Component that guarantees stream is bound to the DOM element regardless of React renders
+const RobustVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, label?: React.ReactNode, isMirrored?: boolean }>(({ stream, label, isMirrored = true }, ref) => {
   const localRef = useRef<HTMLVideoElement>(null);
   
   useImperativeHandle(ref, () => localRef.current as HTMLVideoElement);
@@ -39,16 +40,16 @@ const LocalVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, la
   useEffect(() => {
     if (localRef.current && stream) {
       localRef.current.srcObject = stream;
-      localRef.current.play().catch(() => {});
+      localRef.current.play().catch(e => console.warn('Video play prevented:', e));
     }
   }, [stream]);
 
   return (
     <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 flex items-center justify-center">
       {!stream ? (
-        <div className="flex flex-col items-center gap-2 text-stone-500">
+        <div className="flex flex-col items-center gap-2 text-stone-500 p-4 text-center">
           <RefreshCw className="w-5 h-5 animate-spin" />
-          <span className="text-[10px] font-sans">Waiting for camera...</span>
+          <span className="text-[10px] font-sans">Connecting video stream...</span>
         </div>
       ) : (
         <>
@@ -57,10 +58,10 @@ const LocalVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, la
             autoPlay
             playsInline
             muted
-            className="w-full h-full object-cover scale-x-[-1]"
+            className={`w-full h-full object-cover ${isMirrored ? 'scale-x-[-1]' : ''}`}
           />
           {label && (
-            <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white font-sans flex items-center gap-1">
+            <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white font-sans flex items-center gap-1 z-10">
               {label}
             </div>
           )}
@@ -79,7 +80,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const connRef = useRef<any>(null);
-  const frameIntervalRef = useRef<any>(null);
   
   const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'checking'>('checking');
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -87,20 +87,18 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [mode, setMode] = useState<'camera' | 'upload'>('camera');
   
-  // Capture states
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [currentCaptureStep, setCurrentCaptureStep] = useState<number>(-1);
   const [countdown, setCountdown] = useState<number>(0);
   const [tempCapturedPhotos, setTempCapturedPhotos] = useState<string[]>([]);
   const [flashActive, setFlashActive] = useState<boolean>(false);
-
-  // Upload state
   const [uploadedPhotos, setUploadedPhotos] = useState<string[]>([]);
 
-  // Couple Mode (PeerJS) states
+  // Couple Mode states
   const [coupleModeActive, setCoupleModeActive] = useState<boolean>(false);
   const [peer, setPeer] = useState<Peer | null>(null);
   const [conn, setConn] = useState<any>(null);
+  const [currentCall, setCurrentCall] = useState<any>(null);
   const [peerIdCode, setPeerIdCode] = useState<string>('');
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -108,11 +106,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [connectionStatusText, setConnectionStatusText] = useState<string>('');
 
-  // Partner frame preview (received via data channel)
-  const [partnerFrame, setPartnerFrame] = useState<string>('');
+  // Streams
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [partnerStream, setPartnerStream] = useState<MediaStream | null>(null);
 
-  // Dual photo store for merging
+  // Photos
   const [myPhotos, setMyPhotos] = useState<{ [key: number]: string }>({});
   const [partnerPhotos, setPartnerPhotos] = useState<{ [key: number]: string }>({});
 
@@ -179,6 +177,15 @@ export const CameraView: React.FC<CameraViewProps> = ({
       streamRef.current = stream;
       setLocalStream(stream);
       setPermissionState('granted');
+      
+      // If we change camera during an active call, seamlessly replace the video track
+      if (currentCall && isConnected) {
+        const videoTrack = stream.getVideoTracks()[0];
+        const sender = currentCall.peerConnection?.getSenders().find((s: any) => s.track?.kind === 'video');
+        if (sender && videoTrack) {
+          sender.replaceTrack(videoTrack).catch(console.error);
+        }
+      }
     } catch (err: any) {
       console.error('Error starting camera:', err);
       setErrorMsg('Error opening camera stream.');
@@ -194,14 +201,15 @@ export const CameraView: React.FC<CameraViewProps> = ({
   };
 
   const cleanupPeer = () => {
-    stopFrameStreaming();
+    if (currentCall) currentCall.close();
     if (conn) conn.close();
     if (peer) peer.destroy();
     setPeer(null);
     setConn(null);
+    setCurrentCall(null);
     connRef.current = null;
     setIsConnected(false);
-    setPartnerFrame('');
+    setPartnerStream(null);
     setMyPhotos({});
     setPartnerPhotos({});
     setPeerIdCode('');
@@ -214,47 +222,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     startCamera(newId);
   };
 
-  // --- Frame streaming over data channel (Replaces WebRTC Media Streams) ---
-  
-  const startFrameStreaming = (connection: any) => {
-    stopFrameStreaming();
-    
-    frameIntervalRef.current = setInterval(() => {
-      const activeConn = connRef.current || connection;
-      if (!activeConn || !activeConn.open) return;
-
-      const video = videoRef.current;
-      if (!video || video.videoWidth === 0) return;
-
-      const canvas = document.createElement('canvas');
-      canvas.width = 320;
-      canvas.height = 240;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      // Mirror the frame so it looks correct to the partner
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      const frame = canvas.toDataURL('image/jpeg', 0.4);
-      
-      try {
-        activeConn.send({ type: 'FRAME', data: frame });
-      } catch (e) {
-        console.error('Failed to send frame', e);
-      }
-    }, 250); // 4fps preview
-  };
-
-  const stopFrameStreaming = () => {
-    if (frameIntervalRef.current) {
-      clearInterval(frameIntervalRef.current);
-      frameIntervalRef.current = null;
-    }
-  };
-
-  // --- Couple Session Handlers ---
+  // --- Couple Session Handlers (WebRTC Data + Media Streams) ---
 
   const handleCreateSession = () => {
     cleanupPeer();
@@ -276,11 +244,29 @@ export const CameraView: React.FC<CameraViewProps> = ({
       setConnectionStatusText(`Error: ${err.type} - ${err.message}`);
     });
 
+    // 1. Listen for incoming data channel
     newPeer.on('connection', (connection) => {
       console.log('[Host] Partner connected via data channel');
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
+    });
+
+    // 2. Listen for incoming video call
+    newPeer.on('call', (call) => {
+      console.log('[Host] Incoming call. Replying with stream.');
+      const outStream = streamRef.current || new MediaStream();
+      call.answer(outStream);
+      setCurrentCall(call);
+
+      call.on('stream', (remoteStream) => {
+        console.log('[Host] Received partner video stream');
+        setPartnerStream(remoteStream);
+      });
+      
+      call.on('close', () => {
+        setPartnerStream(null);
+      });
     });
   };
 
@@ -302,19 +288,35 @@ export const CameraView: React.FC<CameraViewProps> = ({
       const hostId = `pb-${joinCodeInput}`;
       console.log('[Guest] Connecting to host:', hostId);
       
+      // 1. Establish Data Channel (with TCP reliable mode for strict NATs)
       const connection = newPeer.connect(hostId, { reliable: true });
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
 
-      // Connection timeout safeguard
+      // 2. Initiate Video Call
+      const outStream = streamRef.current || new MediaStream();
+      console.log('[Guest] Calling host with stream.');
+      const call = newPeer.call(hostId, outStream);
+      setCurrentCall(call);
+
+      call.on('stream', (remoteStream) => {
+        console.log('[Guest] Received host video stream');
+        setPartnerStream(remoteStream);
+      });
+      
+      call.on('close', () => {
+        setPartnerStream(null);
+      });
+
+      // Timeout safeguard
       let isOpened = false;
       connection.on('open', () => { isOpened = true; });
       setTimeout(() => {
         if (!isOpened) {
-          setConnectionStatusText('Connection timed out. strict NAT/Firewall blocking WebRTC.');
+          setConnectionStatusText('Connection timed out. Strict NAT/Firewall blocking WebRTC.');
         }
-      }, 12000);
+      }, 15000);
     });
 
     newPeer.on('error', (err) => {
@@ -325,17 +327,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const setupDataConnection = (connection: any) => {
     connection.on('open', () => {
-      console.log('[P2P] Data channel OPEN - starting frame streaming');
+      console.log('[P2P] Data channel OPEN');
       setIsConnected(true);
-      setConnectionStatusText('Connected! Live preview active.');
-      
-      startFrameStreaming(connection);
+      setConnectionStatusText('Connected! Live WebRTC preview active.');
     });
 
     connection.on('data', (data: any) => {
-      if (data.type === 'FRAME') {
-        setPartnerFrame(data.data);
-      } else if (data.type === 'START_COUNTDOWN') {
+      if (data.type === 'START_COUNTDOWN') {
         setIsCapturing(true);
         setTempCapturedPhotos([]);
         setMyPhotos({});
@@ -358,14 +356,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     connection.on('close', () => {
       console.log('[P2P] Data channel closed');
-      stopFrameStreaming();
       setIsConnected(false);
-      setPartnerFrame('');
+      setPartnerStream(null);
       setConnectionStatusText('Partner disconnected.');
-    });
-
-    connection.on('error', (err: any) => {
-      console.error('[P2P] Data channel error:', err);
     });
   };
 
@@ -375,7 +368,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  // --- Capture sequence loop logic ---
+  // --- Capture logic ---
 
   const startCaptureSequence = () => {
     if (!streamRef.current) return;
@@ -439,7 +432,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       
       const activeConn = connRef.current;
       if (isConnected && activeConn) {
-        // Send full-res capture to partner
+        // Send high-res capture to partner via robust data channel
         activeConn.send({
           type: 'LOCAL_CAPTURE_READY',
           photo: imgDataUrl,
@@ -663,7 +656,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         <div className="mb-4 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 flex items-center justify-between text-xs font-sans text-emerald-850">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Connected! Live Data-Channel preview is Active.</span>
+            <span>Connected! Live WebRTC preview is Active.</span>
           </div>
           <button 
             onClick={cleanupPeer}
@@ -701,28 +694,25 @@ export const CameraView: React.FC<CameraViewProps> = ({
                     : 'block'
                 }`}>
                   {/* Left/Main screen: Local user camera */}
-                  <LocalVideo 
+                  <RobustVideo 
                     ref={videoRef} 
                     stream={localStream} 
+                    isMirrored={true}
                     label={coupleModeActive && isConnected ? "You" : undefined}
                   />
                   
-                  {/* Right screen: Partner video preview (Frames over Data Channel) */}
+                  {/* Right screen: Partner video preview via WebRTC Media Stream */}
                   {coupleModeActive && isConnected && (
-                    <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 flex items-center justify-center">
-                      {partnerFrame ? (
-                        <img src={partnerFrame} alt="Partner preview" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="flex flex-col items-center gap-2 text-stone-500">
-                          <RefreshCw className="w-5 h-5 animate-spin" />
-                          <span className="text-[10px] font-sans">Receiving frames...</span>
-                        </div>
-                      )}
-                      <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white font-sans flex items-center gap-1">
-                        <Heart className="w-3 h-3 fill-rose-500 text-rose-500 animate-pulse" />
-                        Partner
-                      </div>
-                    </div>
+                    <RobustVideo 
+                      stream={partnerStream} 
+                      isMirrored={true}
+                      label={
+                        <>
+                          <Heart className="w-3 h-3 fill-rose-500 text-rose-500 animate-pulse" />
+                          Partner
+                        </>
+                      }
+                    />
                   )}
                 </div>
               </div>
