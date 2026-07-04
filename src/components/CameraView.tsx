@@ -19,8 +19,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
   countdownDuration
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const partnerVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const connRef = useRef<any>(null);
+  const frameIntervalRef = useRef<any>(null);
   
   const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'checking'>('checking');
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -42,14 +43,15 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [coupleModeActive, setCoupleModeActive] = useState<boolean>(false);
   const [peer, setPeer] = useState<Peer | null>(null);
   const [conn, setConn] = useState<any>(null);
-  const [currentCall, setCurrentCall] = useState<any>(null);
   const [peerIdCode, setPeerIdCode] = useState<string>('');
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isHost, setIsHost] = useState<boolean>(false);
-  const [partnerStream, setPartnerStream] = useState<MediaStream | null>(null);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [connectionStatusText, setConnectionStatusText] = useState<string>('');
+
+  // Partner frame preview (received via data channel as base64)
+  const [partnerFrame, setPartnerFrame] = useState<string>('');
 
   // Dual photo store for merging
   const [myPhotos, setMyPhotos] = useState<{ [key: number]: string }>({});
@@ -64,28 +66,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, []);
 
-  // Bind partner stream to the partner video element.
-  // This must watch BOTH partnerStream and isConnected because
-  // the <video> element only mounts when isConnected is true,
-  // and both states are set in the same PeerJS callback (batched).
-  // We use a small delay to ensure the DOM element has mounted.
+  // Keep connRef in sync with conn state
   useEffect(() => {
-    if (!partnerStream || !isConnected) return;
-
-    const bindStream = () => {
-      const el = partnerVideoRef.current;
-      if (el) {
-        el.srcObject = partnerStream;
-        el.play().catch(err => console.warn('Partner video play failed:', err));
-      } else {
-        // Element not yet in DOM, retry shortly
-        setTimeout(bindStream, 100);
-      }
-    };
-
-    // Small delay to let React flush the DOM after isConnected triggers conditional render
-    setTimeout(bindStream, 50);
-  }, [partnerStream, isConnected]);
+    connRef.current = conn;
+  }, [conn]);
 
   const checkPermissionsAndDevices = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
@@ -106,7 +90,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      stream.getTracks().forEach(track => track.stop()); // close immediately
+      stream.getTracks().forEach(track => track.stop());
       
       setPermissionState('granted');
       startCamera(videoDevs[0]?.deviceId || '');
@@ -138,21 +122,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
         videoRef.current.srcObject = stream;
       }
       setPermissionState('granted');
-      
-      // If couple mode is active and we are connected, update/initiate call with new stream
-      if (isConnected && conn && currentCall) {
-        // Redo the call with the new stream
-        const partnerPeerId = conn.peer;
-        currentCall.close();
-        
-        const newCall = peer?.call(partnerPeerId, stream);
-        if (newCall) {
-          setCurrentCall(newCall);
-          newCall.on('stream', (remoteStream) => {
-            setPartnerStream(remoteStream);
-          });
-        }
-      }
     } catch (err: any) {
       console.error('Error starting camera:', err);
       setErrorMsg('Error opening camera stream.');
@@ -170,24 +139,71 @@ export const CameraView: React.FC<CameraViewProps> = ({
   };
 
   const cleanupPeer = () => {
-    if (currentCall) currentCall.close();
+    stopFrameStreaming();
     if (conn) conn.close();
-    if (peer) {
-      peer.destroy();
-    }
+    if (peer) peer.destroy();
     setPeer(null);
     setConn(null);
-    setCurrentCall(null);
+    connRef.current = null;
     setIsConnected(false);
-    setPartnerStream(null);
+    setPartnerFrame('');
     setMyPhotos({});
     setPartnerPhotos({});
+    setPeerIdCode('');
+    setConnectionStatusText('');
   };
 
   const handleDeviceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newId = e.target.value;
     setSelectedDeviceId(newId);
     startCamera(newId);
+  };
+
+  // --- Frame streaming over data channel ---
+  // Captures a low-res frame from the local camera and sends it as base64 over the data channel
+  
+  const capturePreviewFrame = (): string | null => {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return null;
+
+    const canvas = document.createElement('canvas');
+    // Low resolution for preview streaming (~15-25KB per frame)
+    canvas.width = 320;
+    canvas.height = 240;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    // Mirror for selfie view
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    return canvas.toDataURL('image/jpeg', 0.4);
+  };
+
+  const startFrameStreaming = (connection: any) => {
+    stopFrameStreaming();
+    
+    frameIntervalRef.current = setInterval(() => {
+      const activeConn = connRef.current || connection;
+      if (!activeConn || !activeConn.open) return;
+
+      const frame = capturePreviewFrame();
+      if (frame) {
+        try {
+          activeConn.send({ type: 'FRAME', data: frame });
+        } catch (e) {
+          // Connection might be closing
+        }
+      }
+    }, 200); // ~5fps preview, very bandwidth-friendly
+  };
+
+  const stopFrameStreaming = () => {
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
   };
 
   // --- Couple Session Handlers ---
@@ -198,9 +214,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
     const peerId = `pb-${randomCode}`;
 
-    const newPeer = new Peer(peerId, {
-      debug: 1
-    });
+    const newPeer = new Peer(peerId, { debug: 1 });
 
     newPeer.on('open', () => {
       setPeer(newPeer);
@@ -214,35 +228,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
       setConnectionStatusText('Code already taken. Please try again.');
     });
 
-    // Listen for incoming connection
+    // Listen for incoming data connection
     newPeer.on('connection', (connection) => {
+      console.log('[Host] Partner connected via data channel');
       setConn(connection);
+      connRef.current = connection;
       setupDataConnection(connection);
-    });
-
-    // Listen for incoming video call
-    newPeer.on('call', (call) => {
-      const localStream = streamRef.current;
-      console.log('[PhotoBooth Host] Incoming call, answering with stream:', !!localStream);
-      
-      if (localStream) {
-        call.answer(localStream);
-      } else {
-        call.answer(new MediaStream());
-      }
-      
-      setCurrentCall(call);
-      
-      call.on('stream', (remoteStream: MediaStream) => {
-        console.log('[PhotoBooth Host] Received partner stream, tracks:', remoteStream.getTracks().length);
-        setPartnerStream(remoteStream);
-        setIsConnected(true);
-        setConnectionStatusText('Partner connected!');
-      });
-      
-      call.on('error', (err: any) => {
-        console.error('[PhotoBooth Host] Call error:', err);
-      });
     });
   };
 
@@ -255,34 +246,19 @@ export const CameraView: React.FC<CameraViewProps> = ({
     cleanupPeer();
     setConnectionStatusText('Connecting to session...');
     
-    const newPeer = new Peer();
+    const newPeer = new Peer(undefined, { debug: 1 });
     
     newPeer.on('open', () => {
       setPeer(newPeer);
       setIsHost(false);
       
       const hostId = `pb-${joinCodeInput}`;
-      const connection = newPeer.connect(hostId);
+      console.log('[Guest] Connecting to host:', hostId);
+      
+      const connection = newPeer.connect(hostId, { reliable: true });
       setConn(connection);
+      connRef.current = connection;
       setupDataConnection(connection);
-
-      // Call the host with our local stream
-      const localStream = streamRef.current || new MediaStream();
-      console.log('[PhotoBooth Guest] Calling host with stream:', !!streamRef.current);
-      
-      const call = newPeer.call(hostId, localStream);
-      setCurrentCall(call);
-      
-      call.on('stream', (remoteStream: MediaStream) => {
-        console.log('[PhotoBooth Guest] Received host stream, tracks:', remoteStream.getTracks().length);
-        setPartnerStream(remoteStream);
-        setIsConnected(true);
-        setConnectionStatusText('Connected to host!');
-      });
-      
-      call.on('error', (err: any) => {
-        console.error('[PhotoBooth Guest] Call error:', err);
-      });
     });
 
     newPeer.on('error', (err) => {
@@ -293,14 +269,19 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const setupDataConnection = (connection: any) => {
     connection.on('open', () => {
-      // Data channel open - don't set isConnected here.
-      // Wait for the media stream to arrive so both isConnected
-      // and partnerStream are set in the same render cycle.
-      console.log('[PhotoBooth] Data channel open');
+      console.log('[P2P] Data channel OPEN - starting frame streaming');
+      setIsConnected(true);
+      setConnectionStatusText('Connected! Streaming live preview...');
+      
+      // Start streaming local camera frames to partner
+      startFrameStreaming(connection);
     });
 
     connection.on('data', (data: any) => {
-      if (data.type === 'START_COUNTDOWN') {
+      if (data.type === 'FRAME') {
+        // Received a preview frame from partner
+        setPartnerFrame(data.data);
+      } else if (data.type === 'START_COUNTDOWN') {
         setIsCapturing(true);
         setTempCapturedPhotos([]);
         setMyPhotos({});
@@ -322,9 +303,15 @@ export const CameraView: React.FC<CameraViewProps> = ({
     });
 
     connection.on('close', () => {
+      console.log('[P2P] Data channel closed');
+      stopFrameStreaming();
       setIsConnected(false);
-      setPartnerStream(null);
+      setPartnerFrame('');
       setConnectionStatusText('Partner disconnected.');
+    });
+
+    connection.on('error', (err: any) => {
+      console.error('[P2P] Data channel error:', err);
     });
   };
 
@@ -339,9 +326,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const startCaptureSequence = () => {
     if (!streamRef.current) return;
     
-    if (isConnected && conn) {
+    const activeConn = connRef.current;
+    if (isConnected && activeConn) {
       // Sync trigger to partner
-      conn.send({
+      activeConn.send({
         type: 'START_COUNTDOWN',
         countdownDuration: countdownDuration
       });
@@ -397,9 +385,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
       
       const imgDataUrl = canvas.toDataURL('image/jpeg', 0.95);
       
-      if (isConnected && conn) {
-        // Send frame to partner
-        conn.send({
+      const activeConn = connRef.current;
+      if (isConnected && activeConn) {
+        // Send full-res capture to partner
+        activeConn.send({
           type: 'LOCAL_CAPTURE_READY',
           photo: imgDataUrl,
           step: currentCaptureStep
@@ -431,7 +420,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const mergeAndAdvance = async (step: number, photo1: string, photo2: string) => {
     try {
-      // Host is left half, Guest is right half
       const leftPhoto = isHost ? photo1 : photo2;
       const rightPhoto = isHost ? photo2 : photo1;
 
@@ -449,8 +437,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
   };
 
   const handleResetSession = () => {
-    if (isConnected && conn) {
-      conn.send({ type: 'RESET_SESSION' });
+    const activeConn = connRef.current;
+    if (isConnected && activeConn) {
+      activeConn.send({ type: 'RESET_SESSION' });
     }
     setIsCapturing(false);
     setCurrentCaptureStep(-1);
@@ -500,7 +489,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       {/* Modes Bar */}
       <div className="flex flex-wrap gap-2 mb-4 bg-stone-100 p-1.5 rounded-2xl w-fit">
         <button
-          onClick={() => { setMode('camera'); startCamera(selectedDeviceId); }}
+          onClick={() => { setMode('camera'); setCoupleModeActive(false); cleanupPeer(); startCamera(selectedDeviceId); }}
           className={`flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-sans font-medium rounded-xl transition-all ${
             mode === 'camera' && !coupleModeActive
               ? 'bg-white text-stone-900 shadow-sm' 
@@ -523,7 +512,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           }`}
         >
           <Users className="w-4 h-4" />
-          Couple Mode (P2P)
+          Couple Mode
         </button>
         <button
           onClick={() => { setMode('upload'); setCoupleModeActive(false); stopCamera(); cleanupPeer(); }}
@@ -543,7 +532,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         <div className="mb-4 bg-rose-50/50 border border-rose-100 rounded-2xl p-4 sm:p-5 flex flex-col gap-4">
           <div className="flex items-center gap-2 text-rose-700 font-sans font-semibold text-sm">
             <Heart className="w-4 h-4 fill-rose-500 text-rose-500 animate-pulse" />
-            Connect with your Couple Booth partner
+            Connect with your partner
           </div>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -552,7 +541,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               <div>
                 <h4 className="text-xs font-bold text-stone-850 mb-1">Option A: Host Session</h4>
                 <p className="text-[11px] text-stone-500 leading-relaxed mb-3">
-                  Generate a temporary room code to let your partner join your booth setup.
+                  Generate a code and share it with your partner.
                 </p>
               </div>
               {peerIdCode ? (
@@ -585,7 +574,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               <div>
                 <h4 className="text-xs font-bold text-stone-850 mb-1">Option B: Join Session</h4>
                 <p className="text-[11px] text-stone-500 leading-relaxed mb-3">
-                  Enter your partner's 6-digit session code to establish WebRTC connection.
+                  Enter your partner's 6-digit session code.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -601,7 +590,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 <button
                   onClick={handleJoinSession}
                   disabled={permissionState !== 'granted' || joinCodeInput.length !== 6}
-                  className="bg-rose-600 hover:bg-rose-500 disabled:bg-stone-350 disabled:text-stone-500 disabled:cursor-not-allowed text-white font-sans text-xs font-semibold py-2 px-4 rounded-lg flex items-center gap-1.5 transition-all whitespace-nowrap"
+                  className="bg-rose-600 hover:bg-rose-500 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-sans text-xs font-semibold py-2 px-4 rounded-lg flex items-center gap-1.5 transition-all whitespace-nowrap"
                 >
                   Join
                 </button>
@@ -621,7 +610,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         <div className="mb-4 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 flex items-center justify-between text-xs font-sans text-emerald-850">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Connected! Live Couple Camera Sync is Active.</span>
+            <span>Connected! Live preview streaming via data channel.</span>
           </div>
           <button 
             onClick={cleanupPeer}
@@ -654,13 +643,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
             {permissionState === 'granted' && (
               <div className="w-full h-full relative">
-                <div className={`w-full h-full bg-stone-900 p-1.5 ${
+                <div className={`w-full h-full bg-stone-900 ${
                   coupleModeActive && isConnected 
-                    ? 'grid grid-cols-2 gap-1.5' 
+                    ? 'grid grid-cols-2 gap-1 p-1' 
                     : 'block'
                 }`}>
-                  {/* Left/Main screen: Local user */}
-                  <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 border border-stone-800">
+                  {/* Left/Main screen: Local user camera */}
+                  <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950">
                     <video
                       ref={videoRef}
                       autoPlay
@@ -675,16 +664,21 @@ export const CameraView: React.FC<CameraViewProps> = ({
                     )}
                   </div>
                   
-                  {/* Right screen: Remote partner */}
+                  {/* Right screen: Partner preview (rendered as <img> from data channel frames) */}
                   {coupleModeActive && isConnected && (
-                    <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 border border-stone-800">
-                      <video
-                        ref={partnerVideoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full h-full object-cover scale-x-[-1]"
-                      />
+                    <div className="relative w-full h-full rounded-xl overflow-hidden bg-stone-950 flex items-center justify-center">
+                      {partnerFrame ? (
+                        <img
+                          src={partnerFrame}
+                          alt="Partner preview"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex flex-col items-center gap-2 text-stone-500">
+                          <RefreshCw className="w-5 h-5 animate-spin" />
+                          <span className="text-[10px] font-sans">Waiting for partner's camera...</span>
+                        </div>
+                      )}
                       <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-rose-300 font-sans flex items-center gap-1">
                         <Heart className="w-3 h-3 fill-rose-500 text-rose-500 animate-pulse" />
                         Partner
