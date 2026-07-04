@@ -15,20 +15,14 @@ interface CameraViewProps {
 const PEER_CONFIG = {
   config: {
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:global.stun.twilio.com:3478' },
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      { urls: ['stun:global.stun.twilio.com:3478'] },
       {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp'
+        ],
         username: 'openrelayproject',
         credential: 'openrelayproject'
       }
@@ -277,7 +271,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     newPeer.on('error', (err) => {
       console.error('Peer creation error:', err);
-      setConnectionStatusText('Code already taken. Please try again.');
+      setConnectionStatusText(`Error: ${err.type} - ${err.message}`);
     });
 
     newPeer.on('connection', (connection) => {
@@ -306,15 +300,24 @@ export const CameraView: React.FC<CameraViewProps> = ({
       const hostId = `pb-${joinCodeInput}`;
       console.log('[Guest] Connecting to host:', hostId);
       
-      const connection = newPeer.connect(hostId);
+      const connection = newPeer.connect(hostId, { reliable: true });
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
+
+      // Connection timeout safeguard
+      let isOpened = false;
+      connection.on('open', () => { isOpened = true; });
+      setTimeout(() => {
+        if (!isOpened) {
+          setConnectionStatusText('Connection timed out. strict NAT/Firewall blocking WebRTC.');
+        }
+      }, 12000);
     });
 
     newPeer.on('error', (err) => {
       console.error('Peer join error:', err);
-      setConnectionStatusText('Failed to connect. Double check your code.');
+      setConnectionStatusText(`Failed: ${err.type} - ${err.message}`);
     });
   };
 
