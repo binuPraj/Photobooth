@@ -550,7 +550,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
               ) : (
                 <button
                   onClick={handleCreateSession}
-                  className="bg-stone-900 hover:bg-stone-800 text-white font-sans text-xs font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-1.5 transition-all"
+                  disabled={permissionState !== 'granted'}
+                  className="bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-sans text-xs font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-1.5 transition-all w-full"
                 >
                   <Link2 className="w-3.5 h-3.5" />
                   Generate Code
@@ -573,11 +574,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
                   value={joinCodeInput}
                   onChange={(e) => setJoinCodeInput(e.target.value.replace(/\D/g, ''))}
                   placeholder="Enter 6 digits"
-                  className="text-xs border border-stone-200 rounded-lg px-2.5 py-2 outline-none font-sans font-medium text-stone-700 w-full"
+                  disabled={permissionState !== 'granted'}
+                  className="text-xs border border-stone-200 rounded-lg px-2.5 py-2 outline-none font-sans font-medium text-stone-700 w-full disabled:bg-stone-50"
                 />
                 <button
                   onClick={handleJoinSession}
-                  className="bg-rose-600 hover:bg-rose-500 text-white font-sans text-xs font-semibold py-2 px-4 rounded-lg flex items-center gap-1.5 transition-all whitespace-nowrap"
+                  disabled={permissionState !== 'granted' || joinCodeInput.length !== 6}
+                  className="bg-rose-600 hover:bg-rose-500 disabled:bg-stone-350 disabled:text-stone-500 disabled:cursor-not-allowed text-white font-sans text-xs font-semibold py-2 px-4 rounded-lg flex items-center gap-1.5 transition-all whitespace-nowrap"
                 >
                   Join
                 </button>
@@ -658,6 +661,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
                         ref={partnerVideoRef}
                         autoPlay
                         playsInline
+                        muted
                         className="w-full h-full object-cover scale-x-[-1]"
                       />
                       <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-rose-300 font-sans flex items-center gap-1">
