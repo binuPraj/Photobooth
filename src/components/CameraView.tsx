@@ -116,6 +116,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [myPhotos, setMyPhotos] = useState<{ [key: number]: string }>({});
   const [partnerPhotos, setPartnerPhotos] = useState<{ [key: number]: string }>({});
 
+  const isInstagramBrowser = typeof navigator !== 'undefined' && navigator.userAgent.includes('Instagram');
+
   useEffect(() => {
     checkPermissionsAndDevices();
     return () => {
@@ -578,6 +580,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
             <Heart className="w-4 h-4 fill-rose-500 text-rose-500 animate-pulse" />
             Connect with your partner
           </div>
+
+          {isInstagramBrowser && (
+            <div className="bg-red-100 border border-red-300 text-red-800 p-3 rounded-xl text-xs font-sans font-medium flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <p>
+                <strong>Instagram Browser Detected!</strong><br/>
+                Instagram blocks real-time connections. Please tap the three dots (•••) at the top right and select <strong>"Open in system browser"</strong> (Chrome/Safari) to use Couple Mode.
+              </p>
+            </div>
+          )}
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-white border border-stone-200/60 p-4 rounded-xl flex flex-col justify-between">
