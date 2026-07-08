@@ -30,30 +30,55 @@ type WebRtcStatus = {
   lastEvent: string;
 };
 
-const PEER_CONFIG = {
-  debug: 3, // Enable verbose logging for WebRTC debugging
-  config: {
-    iceServers: [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-      { urls: ['stun:global.stun.twilio.com:3478'] },
-      // NOTE: openrelay.metered.ca is a free, shared, rate-limited demo TURN
-      // server. It goes down or throttles often, and is the #1 cause of
-      // "signaling/NAT traversal did not complete" errors on real networks
-      // (corporate wifi, mobile data, some VPNs). For production, swap this
-      // for a paid TURN provider (Metered.ca paid tier, Twilio NTS,
-      // Cloudflare Calls TURN, or your own coturn instance).
-      {
-        urls: [
-          'turn:openrelay.metered.ca:80',
-          'turn:openrelay.metered.ca:443',
-          'turn:openrelay.metered.ca:443?transport=tcp'
-        ],
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ]
-  }
+// Fallback STUN-only config, used if fetching TURN credentials fails.
+// STUN alone works fine on open networks but will NOT get you through a
+// symmetric NAT/restrictive firewall — that's what TURN is for.
+const STUN_ONLY_FALLBACK = {
+  iceServers: [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: ['stun:global.stun.twilio.com:3478'] }
+  ]
 };
+
+// Your Metered.ca app subdomain, e.g. if your dashboard URL is
+// https://yourappname.metered.live, set VITE_METERED_APP_NAME=yourappname
+// in a .env file at your project root (Vite exposes it via import.meta.env).
+const METERED_APP_NAME = import.meta.env.VITE_METERED_APP_NAME as string | undefined;
+// Your Metered.ca API key, from Dashboard -> your app -> API Key.
+// Sign up free at https://www.metered.ca/stun-turn — no credit card required,
+// 500MB/month free TURN relay usage.
+const METERED_API_KEY = import.meta.env.VITE_METERED_API_KEY as string | undefined;
+
+// Fetches fresh, working TURN credentials from your Metered account instead
+// of relying on the old openrelay.metered.ca static demo credentials, which
+// are now rejected server-side (that's the errorCode 701 you were seeing).
+// Falls back to STUN-only (no TURN) if no API key is configured or the
+// fetch fails, so the app still works on friendly networks either way.
+async function getIceServers(): Promise<RTCIceServer[]> {
+  if (!METERED_APP_NAME || !METERED_API_KEY) {
+    console.warn(
+      'No Metered TURN credentials configured (VITE_METERED_APP_NAME / VITE_METERED_API_KEY). ' +
+      'Falling back to STUN-only, which will fail on restrictive networks. ' +
+      'Sign up free at https://www.metered.ca/stun-turn to fix this.'
+    );
+    return STUN_ONLY_FALLBACK.iceServers;
+  }
+
+  try {
+    const response = await fetch(
+      `https://${METERED_APP_NAME}.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`
+    );
+    if (!response.ok) throw new Error(`Metered credentials request failed: ${response.status}`);
+    const iceServers: RTCIceServer[] = await response.json();
+    return [...STUN_ONLY_FALLBACK.iceServers, ...iceServers];
+  } catch (err) {
+    console.warn('Failed to fetch Metered TURN credentials, falling back to STUN-only:', err);
+    return STUN_ONLY_FALLBACK.iceServers;
+  }
+}
+
+// debug: 3 enables verbose PeerJS/WebRTC logging to the console.
+const PEER_DEBUG_LEVEL = 3;
 
 // How long to wait for the data channel to open before declaring a timeout.
 // TURN relay negotiation on a slow/restrictive network can take longer than
@@ -257,7 +282,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
         errorText: event.errorText
       });
     };
-  };
 
   useEffect(() => {
     logDebug('lifecycle', 'Component mounted and camera/device check started');
@@ -396,14 +420,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   // --- Couple Session Handlers (WebRTC Data + Media Streams) ---
 
-  const handleCreateSession = () => {
+  const handleCreateSession = async () => {
     logDebug('webrtc', 'Host session creation requested');
     cleanupPeer();
     setConnectionStatusText('Generating session code...');
     const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
     const peerId = `pb-${randomCode}`;
 
-    const newPeer = new Peer(peerId, PEER_CONFIG);
+    const iceServers = await getIceServers();
+    logDebug('webrtc', 'Host fetched ICE servers', { count: iceServers.length });
+    const newPeer = new Peer(peerId, { debug: PEER_DEBUG_LEVEL, config: { iceServers } });
     logDebug('webrtc', 'Host peer object created', { peerId });
 
     newPeer.on('open', () => {
@@ -480,7 +506,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     });
   };
 
-  const handleJoinSession = () => {
+  const handleJoinSession = async () => {
     logDebug('webrtc', 'Join session requested', { joinCodeInput });
     if (!joinCodeInput || joinCodeInput.length !== 6) {
       setConnectionStatusText('Please enter a valid 6-digit code.');
@@ -491,7 +517,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
     cleanupPeer();
     setConnectionStatusText('Connecting to session...');
     
-    const newPeer = new Peer(undefined as any, PEER_CONFIG);
+    const iceServers = await getIceServers();
+    logDebug('webrtc', 'Guest fetched ICE servers', { count: iceServers.length });
+    const newPeer = new Peer(undefined, { debug: PEER_DEBUG_LEVEL, config: { iceServers } });
     logDebug('webrtc', 'Guest peer object created with options');
     
     newPeer.on('open', () => {
@@ -1008,7 +1036,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
             <span>Connected! Live WebRTC preview is Active.</span>
           </div>
           <button 
-            onClick={() => cleanupPeer()}
+            onClick={cleanupPeer}
             className="flex items-center gap-1 text-[11px] text-stone-500 hover:text-stone-800 bg-white border border-stone-200/80 px-2.5 py-1 rounded-lg"
           >
             <Unlink className="w-3.5 h-3.5" />
@@ -1210,4 +1238,5 @@ export const CameraView: React.FC<CameraViewProps> = ({
       )}
     </div>
   );
+};
 };
