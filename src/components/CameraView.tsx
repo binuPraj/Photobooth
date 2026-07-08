@@ -267,6 +267,22 @@ export const CameraView: React.FC<CameraViewProps> = ({
         trackId: event.track?.id,
         streams: event.streams?.map(s => s.id)
       });
+
+      // Attach the remote stream directly from the raw ontrack event rather
+      // than relying solely on PeerJS's own call.on('stream', ...) wrapper.
+      // That wrapper event can fail to fire even when ontrack does (a known
+      // PeerJS gap with modern Unified Plan SDP) — this is what was causing
+      // "Connecting video stream..." to hang forever despite a successful
+      // connection.
+      if (event.streams && event.streams[0]) {
+        updateWebRtcStatus({
+          role,
+          mediaState: 'remote-stream-received',
+          lastEvent: `${role} remote stream attached via ontrack`
+        });
+        logDebug('webrtc', `${role} attached remote stream via ontrack fallback`, { streamId: event.streams[0].id });
+        setPartnerStream(event.streams[0]);
+      }
     };
 
     // Surfaces exactly which STUN/TURN server failed and why (e.g. TURN auth
@@ -282,7 +298,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
         errorText: event.errorText
       });
     };
-
   };
 
   useEffect(() => {
