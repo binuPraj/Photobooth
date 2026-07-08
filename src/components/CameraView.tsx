@@ -257,6 +257,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         errorText: event.errorText
       });
     };
+  };
 
   useEffect(() => {
     logDebug('lifecycle', 'Component mounted and camera/device check started');
@@ -490,7 +491,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     cleanupPeer();
     setConnectionStatusText('Connecting to session...');
     
-    const newPeer = new Peer(undefined, PEER_CONFIG);
+    const newPeer = new Peer(undefined as any, PEER_CONFIG);
     logDebug('webrtc', 'Guest peer object created with options');
     
     newPeer.on('open', () => {
@@ -1007,7 +1008,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
             <span>Connected! Live WebRTC preview is Active.</span>
           </div>
           <button 
-            onClick={cleanupPeer}
+            onClick={() => cleanupPeer()}
             className="flex items-center gap-1 text-[11px] text-stone-500 hover:text-stone-800 bg-white border border-stone-200/80 px-2.5 py-1 rounded-lg"
           >
             <Unlink className="w-3.5 h-3.5" />
