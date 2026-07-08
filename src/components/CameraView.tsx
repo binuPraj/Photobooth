@@ -283,6 +283,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
       });
     };
 
+  };
+
   useEffect(() => {
     logDebug('lifecycle', 'Component mounted and camera/device check started');
     checkPermissionsAndDevices();
@@ -1238,5 +1240,4 @@ export const CameraView: React.FC<CameraViewProps> = ({
       )}
     </div>
   );
-};
 };
