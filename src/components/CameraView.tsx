@@ -36,6 +36,12 @@ const PEER_CONFIG = {
     iceServers: [
       { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
       { urls: ['stun:global.stun.twilio.com:3478'] },
+      // NOTE: openrelay.metered.ca is a free, shared, rate-limited demo TURN
+      // server. It goes down or throttles often, and is the #1 cause of
+      // "signaling/NAT traversal did not complete" errors on real networks
+      // (corporate wifi, mobile data, some VPNs). For production, swap this
+      // for a paid TURN provider (Metered.ca paid tier, Twilio NTS,
+      // Cloudflare Calls TURN, or your own coturn instance).
       {
         urls: [
           'turn:openrelay.metered.ca:80',
@@ -48,6 +54,11 @@ const PEER_CONFIG = {
     ]
   }
 };
+
+// How long to wait for the data channel to open before declaring a timeout.
+// TURN relay negotiation on a slow/restrictive network can take longer than
+// the previous 15s allowed, producing false-negative timeouts.
+const CONNECTION_TIMEOUT_MS = 25000;
 
 // Robust Video Component that guarantees stream is bound to the DOM element regardless of React renders
 const RobustVideo = forwardRef<HTMLVideoElement, { stream: MediaStream | null, label?: React.ReactNode, isMirrored?: boolean }>(({ stream, label, isMirrored = true }, ref) => {
@@ -232,7 +243,20 @@ export const CameraView: React.FC<CameraViewProps> = ({
         streams: event.streams?.map(s => s.id)
       });
     };
-  };
+
+    // Surfaces exactly which STUN/TURN server failed and why (e.g. TURN auth
+    // rejected, TURN unreachable, STUN timeout). Without this, "ICE failed"
+    // gives no clue whether it's a bad relay, blocked ports, or something
+    // else — this is the missing piece for diagnosing NAT traversal issues.
+    peerConnection.onicecandidateerror = (event: any) => {
+      logDebug('webrtc', `${role} ICE candidate error`, {
+        address: event.address,
+        port: event.port,
+        url: event.url,
+        errorCode: event.errorCode,
+        errorText: event.errorText
+      });
+    };
 
   useEffect(() => {
     logDebug('lifecycle', 'Component mounted and camera/device check started');
@@ -554,12 +578,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
             dataState: 'timeout',
             lastEvent: 'Guest timeout waiting for data channel open'
           });
-          logDebug('webrtc', 'Guest connection timeout after 15 seconds', {
+          logDebug('webrtc', `Guest connection timeout after ${CONNECTION_TIMEOUT_MS / 1000} seconds`, {
             hostId,
-            note: 'Data connection did not open; this can be caused by blocked WebRTC traffic, unavailable host, or failing TURN relay.'
+            note: 'Data connection did not open; this can be caused by blocked WebRTC traffic, unavailable host, or failing TURN relay. Check the ICE candidate error entries above for the specific cause.'
           });
         }
-      }, 15000);
+      }, CONNECTION_TIMEOUT_MS);
     });
 
     newPeer.on('error', (err) => {
@@ -820,7 +844,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
           onClick={() => { 
             setMode('camera'); 
             setCoupleModeActive(true); 
-            startCamera(selectedDeviceId);
+            // Only (re)start the camera if it isn't already running — avoids
+            // tearing down and re-requesting a stream that's already active.
+            if (!streamRef.current) {
+              startCamera(selectedDeviceId);
+            }
           }}
           className={`flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-sans font-medium rounded-xl transition-all ${
             mode === 'camera' && coupleModeActive
