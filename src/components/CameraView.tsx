@@ -447,8 +447,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
       });
       setTimeout(() => {
         if (!isOpened) {
-          setConnectionStatusText('Connection timed out. Strict NAT/Firewall blocking WebRTC.');
-          logDebug('webrtc', 'Guest connection timeout after 15 seconds');
+          setConnectionStatusText('Connection timed out. WebRTC signaling or NAT traversal did not complete. Check host code, network restrictions, VPN, or TURN availability.');
+          logDebug('webrtc', 'Guest connection timeout after 15 seconds', {
+            hostId,
+            note: 'Data connection did not open; this can be caused by blocked WebRTC traffic, unavailable host, or failing TURN relay.'
+          });
         }
       }, 15000);
     });
