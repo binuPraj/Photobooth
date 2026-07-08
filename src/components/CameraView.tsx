@@ -265,8 +265,29 @@ export const CameraView: React.FC<CameraViewProps> = ({
       logDebug('webrtc', `${role} received track event`, {
         trackKind: event.track?.kind,
         trackId: event.track?.id,
-        streams: event.streams?.map(s => s.id)
+        streams: event.streams?.map(s => s.id),
+        // If muted is true here, the track exists but no media is actually
+        // arriving yet — very common right after ontrack fires, since the
+        // track can be created before the first RTP packet lands.
+        initiallyMuted: event.track?.muted,
+        readyState: event.track?.readyState
       });
+
+      // Track-level visibility: tells us definitively whether media is
+      // actually flowing (unmuted) or the connection is silently stuck
+      // (stays muted) — this is the ground truth that ICE/connection state
+      // alone can't show us.
+      if (event.track) {
+        event.track.onunmute = () => {
+          logDebug('webrtc', `${role} remote track UNMUTED (media is flowing)`, { trackKind: event.track.kind });
+        };
+        event.track.onmute = () => {
+          logDebug('webrtc', `${role} remote track MUTED (media stopped flowing)`, { trackKind: event.track.kind });
+        };
+        event.track.onended = () => {
+          logDebug('webrtc', `${role} remote track ENDED`, { trackKind: event.track.kind });
+        };
+      }
 
       // Attach the remote stream directly from the raw ontrack event rather
       // than relying solely on PeerJS's own call.on('stream', ...) wrapper.
