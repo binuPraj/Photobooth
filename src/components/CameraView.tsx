@@ -19,6 +19,17 @@ type DebugEntry = {
   message: string;
 };
 
+type WebRtcStatus = {
+  role: 'host' | 'guest' | '';
+  peerState: string;
+  dataState: string;
+  mediaState: string;
+  iceState: string;
+  signalingState: string;
+  connectionState: string;
+  lastEvent: string;
+};
+
 const PEER_CONFIG = {
   debug: 3, // Enable verbose logging for WebRTC debugging
   config: {
@@ -112,6 +123,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [isHost, setIsHost] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [connectionStatusText, setConnectionStatusText] = useState<string>('');
+  const [webRtcStatus, setWebRtcStatus] = useState<WebRtcStatus>({
+    role: '',
+    peerState: 'idle',
+    dataState: 'idle',
+    mediaState: 'idle',
+    iceState: 'idle',
+    signalingState: 'idle',
+    connectionState: 'idle',
+    lastEvent: 'Waiting for session start'
+  });
 
   // Streams
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -153,6 +174,63 @@ export const CameraView: React.FC<CameraViewProps> = ({
         muted: track.muted,
         readyState: track.readyState
       }))
+    };
+  };
+
+  const updateWebRtcStatus = (patch: Partial<WebRtcStatus>) => {
+    setWebRtcStatus(prev => ({ ...prev, ...patch }));
+  };
+
+  const attachPeerConnectionDebug = (peerConnection: RTCPeerConnection | null | undefined, role: 'host' | 'guest') => {
+    if (!peerConnection) return;
+
+    updateWebRtcStatus({
+      role,
+      mediaState: 'call-attached',
+      iceState: peerConnection.iceConnectionState,
+      signalingState: peerConnection.signalingState,
+      connectionState: peerConnection.connectionState,
+      lastEvent: `${role} peer connection attached`
+    });
+
+    peerConnection.oniceconnectionstatechange = () => {
+      updateWebRtcStatus({
+        role,
+        iceState: peerConnection.iceConnectionState,
+        lastEvent: `${role} ICE -> ${peerConnection.iceConnectionState}`
+      });
+      logDebug('webrtc', `${role} ICE state changed`, { iceConnectionState: peerConnection.iceConnectionState });
+    };
+
+    peerConnection.onsignalingstatechange = () => {
+      updateWebRtcStatus({
+        role,
+        signalingState: peerConnection.signalingState,
+        lastEvent: `${role} signaling -> ${peerConnection.signalingState}`
+      });
+      logDebug('webrtc', `${role} signaling state changed`, { signalingState: peerConnection.signalingState });
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+      updateWebRtcStatus({
+        role,
+        connectionState: peerConnection.connectionState,
+        lastEvent: `${role} connection -> ${peerConnection.connectionState}`
+      });
+      logDebug('webrtc', `${role} connection state changed`, { connectionState: peerConnection.connectionState });
+    };
+
+    peerConnection.ontrack = (event: RTCTrackEvent) => {
+      updateWebRtcStatus({
+        role,
+        mediaState: 'remote-track-received',
+        lastEvent: `${role} track received: ${event.track?.kind}`
+      });
+      logDebug('webrtc', `${role} received track event`, {
+        trackKind: event.track?.kind,
+        trackId: event.track?.id,
+        streams: event.streams?.map(s => s.id)
+      });
     };
   };
 
@@ -273,6 +351,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setPartnerPhotos({});
     setPeerIdCode('');
     setConnectionStatusText('');
+    updateWebRtcStatus({
+      role: '',
+      peerState: 'idle',
+      dataState: 'idle',
+      mediaState: 'idle',
+      iceState: 'idle',
+      signalingState: 'idle',
+      connectionState: 'idle',
+      lastEvent: 'Session cleaned up'
+    });
   };
 
   const handleDeviceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -298,11 +386,21 @@ export const CameraView: React.FC<CameraViewProps> = ({
       setPeerIdCode(randomCode);
       setIsHost(true);
       setConnectionStatusText('Waiting for partner to join...');
+      updateWebRtcStatus({
+        role: 'host',
+        peerState: 'open',
+        lastEvent: 'Host peer open'
+      });
       logDebug('webrtc', 'Host peer open and ready', { peerId });
     });
 
     newPeer.on('error', (err) => {
       console.error('Peer creation error:', err);
+      updateWebRtcStatus({
+        role: 'host',
+        peerState: 'error',
+        lastEvent: `Host peer error: ${err?.type || 'unknown'}`
+      });
       logDebug('webrtc', 'Host peer error', { type: err?.type, message: err?.message });
       setConnectionStatusText(`Error: ${err.type} - ${err.message}`);
     });
@@ -323,40 +421,34 @@ export const CameraView: React.FC<CameraViewProps> = ({
       const outStream = streamRef.current || new MediaStream();
       call.answer(outStream);
       setCurrentCall(call);
-
-      const peerConnection = call.peerConnection;
-      if (peerConnection) {
-        logDebug('webrtc', 'Host peer connection state after answer', {
-          signalingState: peerConnection.signalingState,
-          iceConnectionState: peerConnection.iceConnectionState,
-          connectionState: peerConnection.connectionState
-        });
-        peerConnection.oniceconnectionstatechange = () => {
-          logDebug('webrtc', 'Host ICE state changed', { iceConnectionState: peerConnection.iceConnectionState });
-        };
-        peerConnection.onconnectionstatechange = () => {
-          logDebug('webrtc', 'Host connection state changed', { connectionState: peerConnection.connectionState });
-        };
-        peerConnection.ontrack = (event: RTCTrackEvent) => {
-          logDebug('webrtc', 'Host received track event', {
-            trackKind: event.track?.kind,
-            trackId: event.track?.id,
-            streams: event.streams?.map(s => s.id)
-          });
-        };
-      }
+      attachPeerConnectionDebug(call.peerConnection, 'host');
 
       call.on('stream', (remoteStream) => {
         console.log('[Host] Received partner video stream');
         logDebug('webrtc', 'Host received partner remote stream', summarizeStream(remoteStream));
+        updateWebRtcStatus({
+          role: 'host',
+          mediaState: 'remote-stream-received',
+          lastEvent: 'Host remote stream received'
+        });
         setPartnerStream(remoteStream);
       });
 
       call.on('error', (err: any) => {
+        updateWebRtcStatus({
+          role: 'host',
+          mediaState: 'error',
+          lastEvent: `Host media error: ${err?.type || 'unknown'}`
+        });
         logDebug('webrtc', 'Host media call error', { type: err?.type, message: err?.message });
       });
       
       call.on('close', () => {
+        updateWebRtcStatus({
+          role: 'host',
+          mediaState: 'closed',
+          lastEvent: 'Host media call closed'
+        });
         logDebug('webrtc', 'Host media call closed');
         setPartnerStream(null);
       });
@@ -380,6 +472,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
     newPeer.on('open', () => {
       setPeer(newPeer);
       setIsHost(false);
+      updateWebRtcStatus({
+        role: 'guest',
+        peerState: 'open',
+        lastEvent: 'Guest peer open'
+      });
       logDebug('webrtc', 'Guest peer open and ready');
       
       const hostId = `pb-${joinCodeInput}`;
@@ -392,6 +489,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
       connRef.current = connection;
       setupDataConnection(connection);
       connection.on('error', (err: any) => {
+        updateWebRtcStatus({
+          role: 'guest',
+          dataState: 'error',
+          lastEvent: `Guest data error: ${err?.type || 'unknown'}`
+        });
         logDebug('webrtc', 'Guest data connection error', { type: err?.type, message: err?.message });
       });
 
@@ -401,40 +503,34 @@ export const CameraView: React.FC<CameraViewProps> = ({
       logDebug('webrtc', 'Guest placing media call', summarizeStream(outStream));
       const call = newPeer.call(hostId, outStream);
       setCurrentCall(call);
-
-      const peerConnection = call.peerConnection;
-      if (peerConnection) {
-        logDebug('webrtc', 'Guest peer connection state after call', {
-          signalingState: peerConnection.signalingState,
-          iceConnectionState: peerConnection.iceConnectionState,
-          connectionState: peerConnection.connectionState
-        });
-        peerConnection.oniceconnectionstatechange = () => {
-          logDebug('webrtc', 'Guest ICE state changed', { iceConnectionState: peerConnection.iceConnectionState });
-        };
-        peerConnection.onconnectionstatechange = () => {
-          logDebug('webrtc', 'Guest connection state changed', { connectionState: peerConnection.connectionState });
-        };
-        peerConnection.ontrack = (event: RTCTrackEvent) => {
-          logDebug('webrtc', 'Guest received track event', {
-            trackKind: event.track?.kind,
-            trackId: event.track?.id,
-            streams: event.streams?.map(s => s.id)
-          });
-        };
-      }
+      attachPeerConnectionDebug(call.peerConnection, 'guest');
 
       call.on('stream', (remoteStream) => {
         console.log('[Guest] Received host video stream');
         logDebug('webrtc', 'Guest received host remote stream', summarizeStream(remoteStream));
+        updateWebRtcStatus({
+          role: 'guest',
+          mediaState: 'remote-stream-received',
+          lastEvent: 'Guest remote stream received'
+        });
         setPartnerStream(remoteStream);
       });
 
       call.on('error', (err: any) => {
+        updateWebRtcStatus({
+          role: 'guest',
+          mediaState: 'error',
+          lastEvent: `Guest media error: ${err?.type || 'unknown'}`
+        });
         logDebug('webrtc', 'Guest media call error', { type: err?.type, message: err?.message });
       });
       
       call.on('close', () => {
+        updateWebRtcStatus({
+          role: 'guest',
+          mediaState: 'closed',
+          lastEvent: 'Guest media call closed'
+        });
         logDebug('webrtc', 'Guest media call closed');
         setPartnerStream(null);
       });
@@ -443,11 +539,21 @@ export const CameraView: React.FC<CameraViewProps> = ({
       let isOpened = false;
       connection.on('open', () => {
         isOpened = true;
+        updateWebRtcStatus({
+          role: 'guest',
+          dataState: 'open',
+          lastEvent: 'Guest data channel open'
+        });
         logDebug('webrtc', 'Guest data connection open');
       });
       setTimeout(() => {
         if (!isOpened) {
           setConnectionStatusText('Connection timed out. WebRTC signaling or NAT traversal did not complete. Check host code, network restrictions, VPN, or TURN availability.');
+          updateWebRtcStatus({
+            role: 'guest',
+            dataState: 'timeout',
+            lastEvent: 'Guest timeout waiting for data channel open'
+          });
           logDebug('webrtc', 'Guest connection timeout after 15 seconds', {
             hostId,
             note: 'Data connection did not open; this can be caused by blocked WebRTC traffic, unavailable host, or failing TURN relay.'
@@ -458,6 +564,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     newPeer.on('error', (err) => {
       console.error('Peer join error:', err);
+      updateWebRtcStatus({
+        role: 'guest',
+        peerState: 'error',
+        lastEvent: `Guest peer error: ${err?.type || 'unknown'}`
+      });
       logDebug('webrtc', 'Guest peer error', { type: err?.type, message: err?.message });
       setConnectionStatusText(`Failed: ${err.type} - ${err.message}`);
     });
@@ -467,6 +578,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
     logDebug('webrtc', 'Configuring data connection listeners');
     connection.on('open', () => {
       console.log('[P2P] Data channel OPEN');
+      updateWebRtcStatus({
+        dataState: 'open',
+        lastEvent: 'Data channel open'
+      });
       logDebug('webrtc', 'Data channel open');
       setIsConnected(true);
       setConnectionStatusText('Connected! Live WebRTC preview active.');
@@ -499,6 +614,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     connection.on('close', () => {
       console.log('[P2P] Data channel closed');
+      updateWebRtcStatus({
+        dataState: 'closed',
+        lastEvent: 'Data channel closed'
+      });
       logDebug('webrtc', 'Data channel closed');
       setIsConnected(false);
       setPartnerStream(null);
@@ -506,6 +625,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
     });
 
     connection.on('error', (err: any) => {
+      updateWebRtcStatus({
+        dataState: 'error',
+        lastEvent: `Data connection error: ${err?.type || 'unknown'}`
+      });
       logDebug('webrtc', 'Data connection error', { type: err?.type, message: err?.message });
     });
   };
@@ -803,6 +926,24 @@ export const CameraView: React.FC<CameraViewProps> = ({
               {connectionStatusText}
             </div>
           )}
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-2">
+            {[
+              { label: 'Role', value: webRtcStatus.role || 'idle' },
+              { label: 'Peer', value: webRtcStatus.peerState },
+              { label: 'Data', value: webRtcStatus.dataState },
+              { label: 'Media', value: webRtcStatus.mediaState },
+              { label: 'ICE', value: webRtcStatus.iceState },
+              { label: 'Signal', value: webRtcStatus.signalingState },
+              { label: 'Conn', value: webRtcStatus.connectionState },
+              { label: 'Last', value: webRtcStatus.lastEvent }
+            ].map(item => (
+              <div key={item.label} className="bg-white/80 border border-stone-200 rounded-xl px-3 py-2">
+                <div className="text-[10px] uppercase tracking-widest text-stone-400">{item.label}</div>
+                <div className="text-[11px] font-mono text-stone-800 break-words mt-1">{item.value}</div>
+              </div>
+            ))}
+          </div>
 
           <div className="bg-stone-950 text-stone-100 rounded-2xl border border-stone-800 p-3">
             <div className="flex items-center justify-between mb-2">
