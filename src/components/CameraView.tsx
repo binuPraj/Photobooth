@@ -12,6 +12,13 @@ interface CameraViewProps {
   countdownDuration: number;
 }
 
+type DebugEntry = {
+  id: number;
+  time: string;
+  section: string;
+  message: string;
+};
+
 const PEER_CONFIG = {
   debug: 3, // Enable verbose logging for WebRTC debugging
   config: {
@@ -113,14 +120,48 @@ export const CameraView: React.FC<CameraViewProps> = ({
   // Photos
   const [myPhotos, setMyPhotos] = useState<{ [key: number]: string }>({});
   const [partnerPhotos, setPartnerPhotos] = useState<{ [key: number]: string }>({});
+  const [debugEntries, setDebugEntries] = useState<DebugEntry[]>([]);
+  const debugIdRef = useRef(0);
 
   const isInstagramBrowser = typeof navigator !== 'undefined' && navigator.userAgent.includes('Instagram');
 
+  const logDebug = (section: string, message: string, details?: unknown) => {
+    const time = new Date().toLocaleTimeString([], { hour12: false });
+    const detailSuffix = details !== undefined ? ` | ${typeof details === 'string' ? details : JSON.stringify(details)}` : '';
+    const entry = {
+      id: ++debugIdRef.current,
+      time,
+      section,
+      message: `${message}${detailSuffix}`
+    };
+
+    console.log(`[${section}] ${message}`, details ?? '');
+    setDebugEntries(prev => [entry, ...prev].slice(0, 20));
+  };
+
+  const summarizeStream = (stream: MediaStream | null) => {
+    if (!stream) return 'no stream';
+
+    return {
+      id: stream.id,
+      active: stream.active,
+      tracks: stream.getTracks().map(track => ({
+        kind: track.kind,
+        id: track.id,
+        label: track.label,
+        enabled: track.enabled,
+        muted: track.muted,
+        readyState: track.readyState
+      }))
+    };
+  };
+
   useEffect(() => {
+    logDebug('lifecycle', 'Component mounted and camera/device check started');
     checkPermissionsAndDevices();
     return () => {
-      stopCamera();
-      cleanupPeer();
+      stopCamera(true);
+      cleanupPeer(true);
     };
   }, []);
 
@@ -129,30 +170,38 @@ export const CameraView: React.FC<CameraViewProps> = ({
   }, [conn]);
 
   const checkPermissionsAndDevices = async () => {
+    logDebug('camera', 'Checking media device support');
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
       setPermissionState('denied');
       setErrorMsg('Webcam API is not supported by your browser.');
       setMode('upload');
+      logDebug('camera', 'MediaDevices API not supported in this browser');
       return;
     }
 
     try {
       setPermissionState('checking');
+      logDebug('camera', 'Enumerating video input devices');
       const devList = await navigator.mediaDevices.enumerateDevices();
       const videoDevs = devList.filter(d => d.kind === 'videoinput');
       setDevices(videoDevs);
+      logDebug('camera', 'Video devices found', { count: videoDevs.length, deviceIds: videoDevs.map(d => d.deviceId) });
       
       if (videoDevs.length > 0) {
         setSelectedDeviceId(videoDevs[0].deviceId);
       }
 
+      logDebug('camera', 'Requesting temporary camera access to validate permissions');
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      logDebug('camera', 'Temporary camera stream acquired', summarizeStream(stream));
       stream.getTracks().forEach(track => track.stop());
       
       setPermissionState('granted');
+      logDebug('camera', 'Camera permissions granted; starting active preview');
       startCamera(videoDevs[0]?.deviceId || '');
     } catch (err: any) {
       console.error('Camera permission check failed:', err);
+      logDebug('camera', 'Camera permission check failed', { name: err?.name, message: err?.message });
       setPermissionState('denied');
       setMode('upload');
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -164,6 +213,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   };
 
   const startCamera = async (deviceId: string) => {
+    logDebug('camera', 'Starting camera stream', { deviceId: deviceId || 'default' });
     stopCamera();
     setErrorMsg('');
 
@@ -177,30 +227,39 @@ export const CameraView: React.FC<CameraViewProps> = ({
       streamRef.current = stream;
       setLocalStream(stream);
       setPermissionState('granted');
+      logDebug('camera', 'Active camera stream ready', summarizeStream(stream));
       
       // If we change camera during an active call, seamlessly replace the video track
       if (currentCall && isConnected) {
         const videoTrack = stream.getVideoTracks()[0];
         const sender = currentCall.peerConnection?.getSenders().find((s: any) => s.track?.kind === 'video');
         if (sender && videoTrack) {
+          logDebug('webrtc', 'Replacing outgoing video track after camera change');
           sender.replaceTrack(videoTrack).catch(console.error);
         }
       }
     } catch (err: any) {
       console.error('Error starting camera:', err);
+      logDebug('camera', 'Error starting camera stream', { name: err?.name, message: err?.message, constraints });
       setErrorMsg('Error opening camera stream.');
     }
   };
 
-  const stopCamera = () => {
+  const stopCamera = (silent = false) => {
     if (streamRef.current) {
+      if (!silent) {
+        logDebug('camera', 'Stopping active camera stream', summarizeStream(streamRef.current));
+      }
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
       setLocalStream(null);
     }
   };
 
-  const cleanupPeer = () => {
+  const cleanupPeer = (silent = false) => {
+    if (!silent) {
+      logDebug('webrtc', 'Cleaning up peer/session resources');
+    }
     if (currentCall) currentCall.close();
     if (conn) conn.close();
     if (peer) peer.destroy();
@@ -225,28 +284,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
   // --- Couple Session Handlers (WebRTC Data + Media Streams) ---
 
   const handleCreateSession = () => {
+    logDebug('webrtc', 'Host session creation requested');
     cleanupPeer();
     setConnectionStatusText('Generating session code...');
     const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
     const peerId = `pb-${randomCode}`;
 
     const newPeer = new Peer(peerId, PEER_CONFIG);
+    logDebug('webrtc', 'Host peer object created', { peerId });
 
     newPeer.on('open', () => {
       setPeer(newPeer);
       setPeerIdCode(randomCode);
       setIsHost(true);
       setConnectionStatusText('Waiting for partner to join...');
+      logDebug('webrtc', 'Host peer open and ready', { peerId });
     });
 
     newPeer.on('error', (err) => {
       console.error('Peer creation error:', err);
+      logDebug('webrtc', 'Host peer error', { type: err?.type, message: err?.message });
       setConnectionStatusText(`Error: ${err.type} - ${err.message}`);
     });
 
     // 1. Listen for incoming data channel
     newPeer.on('connection', (connection) => {
       console.log('[Host] Partner connected via data channel');
+      logDebug('webrtc', 'Host received incoming data connection');
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
@@ -255,79 +319,152 @@ export const CameraView: React.FC<CameraViewProps> = ({
     // 2. Listen for incoming video call
     newPeer.on('call', (call) => {
       console.log('[Host] Incoming call. Replying with stream.');
+      logDebug('webrtc', 'Host received incoming media call', summarizeStream(streamRef.current));
       const outStream = streamRef.current || new MediaStream();
       call.answer(outStream);
       setCurrentCall(call);
 
+      const peerConnection = call.peerConnection;
+      if (peerConnection) {
+        logDebug('webrtc', 'Host peer connection state after answer', {
+          signalingState: peerConnection.signalingState,
+          iceConnectionState: peerConnection.iceConnectionState,
+          connectionState: peerConnection.connectionState
+        });
+        peerConnection.oniceconnectionstatechange = () => {
+          logDebug('webrtc', 'Host ICE state changed', { iceConnectionState: peerConnection.iceConnectionState });
+        };
+        peerConnection.onconnectionstatechange = () => {
+          logDebug('webrtc', 'Host connection state changed', { connectionState: peerConnection.connectionState });
+        };
+        peerConnection.ontrack = (event: RTCTrackEvent) => {
+          logDebug('webrtc', 'Host received track event', {
+            trackKind: event.track?.kind,
+            trackId: event.track?.id,
+            streams: event.streams?.map(s => s.id)
+          });
+        };
+      }
+
       call.on('stream', (remoteStream) => {
         console.log('[Host] Received partner video stream');
+        logDebug('webrtc', 'Host received partner remote stream', summarizeStream(remoteStream));
         setPartnerStream(remoteStream);
+      });
+
+      call.on('error', (err: any) => {
+        logDebug('webrtc', 'Host media call error', { type: err?.type, message: err?.message });
       });
       
       call.on('close', () => {
+        logDebug('webrtc', 'Host media call closed');
         setPartnerStream(null);
       });
     });
   };
 
   const handleJoinSession = () => {
+    logDebug('webrtc', 'Join session requested', { joinCodeInput });
     if (!joinCodeInput || joinCodeInput.length !== 6) {
       setConnectionStatusText('Please enter a valid 6-digit code.');
+      logDebug('webrtc', 'Join aborted due to invalid code length');
       return;
     }
     
     cleanupPeer();
     setConnectionStatusText('Connecting to session...');
     
-    const newPeer = new Peer(PEER_CONFIG);
+    const newPeer = new Peer(undefined, PEER_CONFIG);
+    logDebug('webrtc', 'Guest peer object created with options');
     
     newPeer.on('open', () => {
       setPeer(newPeer);
       setIsHost(false);
+      logDebug('webrtc', 'Guest peer open and ready');
       
       const hostId = `pb-${joinCodeInput}`;
       console.log('[Guest] Connecting to host:', hostId);
+      logDebug('webrtc', 'Guest connecting to host', { hostId });
       
       // 1. Establish Data Channel (with TCP reliable mode for strict NATs)
       const connection = newPeer.connect(hostId, { reliable: true });
       setConn(connection);
       connRef.current = connection;
       setupDataConnection(connection);
+      connection.on('error', (err: any) => {
+        logDebug('webrtc', 'Guest data connection error', { type: err?.type, message: err?.message });
+      });
 
       // 2. Initiate Video Call
       const outStream = streamRef.current || new MediaStream();
       console.log('[Guest] Calling host with stream.');
+      logDebug('webrtc', 'Guest placing media call', summarizeStream(outStream));
       const call = newPeer.call(hostId, outStream);
       setCurrentCall(call);
 
+      const peerConnection = call.peerConnection;
+      if (peerConnection) {
+        logDebug('webrtc', 'Guest peer connection state after call', {
+          signalingState: peerConnection.signalingState,
+          iceConnectionState: peerConnection.iceConnectionState,
+          connectionState: peerConnection.connectionState
+        });
+        peerConnection.oniceconnectionstatechange = () => {
+          logDebug('webrtc', 'Guest ICE state changed', { iceConnectionState: peerConnection.iceConnectionState });
+        };
+        peerConnection.onconnectionstatechange = () => {
+          logDebug('webrtc', 'Guest connection state changed', { connectionState: peerConnection.connectionState });
+        };
+        peerConnection.ontrack = (event: RTCTrackEvent) => {
+          logDebug('webrtc', 'Guest received track event', {
+            trackKind: event.track?.kind,
+            trackId: event.track?.id,
+            streams: event.streams?.map(s => s.id)
+          });
+        };
+      }
+
       call.on('stream', (remoteStream) => {
         console.log('[Guest] Received host video stream');
+        logDebug('webrtc', 'Guest received host remote stream', summarizeStream(remoteStream));
         setPartnerStream(remoteStream);
+      });
+
+      call.on('error', (err: any) => {
+        logDebug('webrtc', 'Guest media call error', { type: err?.type, message: err?.message });
       });
       
       call.on('close', () => {
+        logDebug('webrtc', 'Guest media call closed');
         setPartnerStream(null);
       });
 
       // Timeout safeguard
       let isOpened = false;
-      connection.on('open', () => { isOpened = true; });
+      connection.on('open', () => {
+        isOpened = true;
+        logDebug('webrtc', 'Guest data connection open');
+      });
       setTimeout(() => {
         if (!isOpened) {
           setConnectionStatusText('Connection timed out. Strict NAT/Firewall blocking WebRTC.');
+          logDebug('webrtc', 'Guest connection timeout after 15 seconds');
         }
       }, 15000);
     });
 
     newPeer.on('error', (err) => {
       console.error('Peer join error:', err);
+      logDebug('webrtc', 'Guest peer error', { type: err?.type, message: err?.message });
       setConnectionStatusText(`Failed: ${err.type} - ${err.message}`);
     });
   };
 
   const setupDataConnection = (connection: any) => {
+    logDebug('webrtc', 'Configuring data connection listeners');
     connection.on('open', () => {
       console.log('[P2P] Data channel OPEN');
+      logDebug('webrtc', 'Data channel open');
       setIsConnected(true);
       setConnectionStatusText('Connected! Live WebRTC preview active.');
     });
@@ -340,25 +477,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
         setPartnerPhotos({});
         setCountdown(data.countdownDuration);
         setCurrentCaptureStep(0);
+        logDebug('capture', 'Received countdown start over data channel', data);
       } else if (data.type === 'LOCAL_CAPTURE_READY') {
         setPartnerPhotos(prev => ({
           ...prev,
           [data.step]: data.photo
         }));
+        logDebug('capture', 'Received partner photo for step', { step: data.step });
       } else if (data.type === 'RESET_SESSION') {
         setIsCapturing(false);
         setCurrentCaptureStep(-1);
         setTempCapturedPhotos([]);
         setMyPhotos({});
         setPartnerPhotos({});
+        logDebug('capture', 'Reset session received over data channel');
       }
     });
 
     connection.on('close', () => {
       console.log('[P2P] Data channel closed');
+      logDebug('webrtc', 'Data channel closed');
       setIsConnected(false);
       setPartnerStream(null);
       setConnectionStatusText('Partner disconnected.');
+    });
+
+    connection.on('error', (err: any) => {
+      logDebug('webrtc', 'Data connection error', { type: err?.type, message: err?.message });
     });
   };
 
@@ -372,6 +517,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const startCaptureSequence = () => {
     if (!streamRef.current) return;
+    logDebug('capture', 'Capture sequence started', { layoutPhotos: layout.photosCount, countdownDuration });
     
     const activeConn = connRef.current;
     if (isConnected && activeConn) {
@@ -379,6 +525,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         type: 'START_COUNTDOWN',
         countdownDuration: countdownDuration
       });
+      logDebug('capture', 'Sent countdown start to partner');
     }
 
     setIsCapturing(true);
@@ -414,6 +561,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const captureSinglePhoto = () => {
     if (!videoRef.current) return;
 
+    logDebug('capture', 'Capturing photo at step', { currentCaptureStep, hasRemote: isConnected });
     setFlashActive(true);
     setTimeout(() => setFlashActive(false), 500);
 
@@ -438,6 +586,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           photo: imgDataUrl,
           step: currentCaptureStep
         });
+        logDebug('capture', 'Sent local capture to partner', { step: currentCaptureStep });
         setMyPhotos(prev => ({ ...prev, [currentCaptureStep]: imgDataUrl }));
       } else {
         setTempCapturedPhotos(prev => [...prev, imgDataUrl]);
@@ -462,12 +611,14 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const mergeAndAdvance = async (step: number, photo1: string, photo2: string) => {
     try {
+      logDebug('capture', 'Merging photos for step', { step, isHost });
       const leftPhoto = isHost ? photo1 : photo2;
       const rightPhoto = isHost ? photo2 : photo1;
 
       const merged = await mergePhotosSideBySide(leftPhoto, rightPhoto, layout.aspectRatio);
       
       setTempCapturedPhotos(prev => [...prev, merged]);
+      logDebug('capture', 'Merged photo stored and advancing', { step });
 
       setTimeout(() => {
         setCurrentCaptureStep(prev => prev + 1);
@@ -649,6 +800,31 @@ export const CameraView: React.FC<CameraViewProps> = ({
               {connectionStatusText}
             </div>
           )}
+
+          <div className="bg-stone-950 text-stone-100 rounded-2xl border border-stone-800 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold uppercase tracking-widest text-stone-400">Debug Trace</span>
+              <button
+                type="button"
+                onClick={() => setDebugEntries([])}
+                className="text-[10px] text-stone-400 hover:text-white"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="max-h-56 overflow-auto space-y-2 pr-1 font-mono text-[10px] leading-relaxed">
+              {debugEntries.length === 0 ? (
+                <div className="text-stone-500">Waiting for events...</div>
+              ) : (
+                debugEntries.map(entry => (
+                  <div key={entry.id} className="rounded-lg bg-white/5 border border-white/5 px-2 py-1">
+                    <div className="text-emerald-300">[{entry.time}] {entry.section}</div>
+                    <div className="text-stone-200">{entry.message}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       )}
 
